@@ -25,11 +25,11 @@ class Task(BaseModel):
 class Supply(BaseModel):
     id: str
     user_id: str
-    provider_name: str
+    title: str
+    description: str
     lat: float
     lng: float
     rating: float
-    description: str
     created_at: str
     valid_from: str
     valid_to: str
@@ -58,7 +58,7 @@ def get_mock_supplies():
         {
             "id": f"supply_{i}",
             "user_id": f"provider_{200+i}",
-            "provider_name": f"主播小张 #{i}",
+            "title": f"提供东京涩谷直播服务 #{i}",
             "lat": 35.6595,
             "lng": 139.7005,
             "rating": 4.8,
@@ -98,7 +98,7 @@ async def create_task(task: Task):
 @app.post("/supplies/create")
 async def create_supply(supply: Supply):
     """供给者发布服务能力"""
-    print(f"接收到新供给: {supply.provider_name}")
+    print(f"接收到新供给: {supply.title}")
     return {"status": "success", "supply_id": supply.id}
 
 @app.get("/search")
