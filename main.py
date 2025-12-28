@@ -3,6 +3,7 @@ from typing import List, Optional
 from pydantic import BaseModel
 import uvicorn
 import random
+from datetime import datetime, timedelta
 
 app = FastAPI(title="VisionUber API")
 
@@ -10,20 +11,28 @@ app = FastAPI(title="VisionUber API")
 
 class Task(BaseModel):
     id: str
+    user_id: str
     title: str
     description: str
     lat: float
     lng: float
     budget: float
     status: str  # pending, matching, completed
+    created_at: str
+    valid_from: str
+    valid_to: str
 
 class Supply(BaseModel):
     id: str
+    user_id: str
     provider_name: str
     lat: float
     lng: float
     rating: float
     description: str
+    created_at: str
+    valid_from: str
+    valid_to: str
 
 # --- Mock 数据生成器 ---
 
@@ -31,12 +40,16 @@ def get_mock_tasks():
     return [
         {
             "id": f"task_{i}",
+            "user_id": f"user_{100+i}",
             "title": f"我想看涩谷十字路口 #{i}",
             "description": "希望能看到现在的人流情况，最好能拍到大屏幕。",
             "lat": 35.6595,
             "lng": 139.7005,
             "budget": 10.0 + i,
-            "status": "pending"
+            "status": "pending",
+            "created_at": datetime.now().isoformat(),
+            "valid_from": datetime.now().isoformat(timespec='minutes'),
+            "valid_to": (datetime.now() + timedelta(hours=2)).isoformat(timespec='minutes')
         } for i in range(5)
     ]
 
@@ -44,11 +57,15 @@ def get_mock_supplies():
     return [
         {
             "id": f"supply_{i}",
+            "user_id": f"provider_{200+i}",
             "provider_name": f"主播小张 #{i}",
             "lat": 35.6595,
             "lng": 139.7005,
             "rating": 4.8,
-            "description": "人在东京，专业接单，画质清晰。"
+            "description": "人在东京，专业接单，画质清晰。",
+            "created_at": datetime.now().isoformat(),
+            "valid_from": datetime.now().isoformat(timespec='minutes'),
+            "valid_to": (datetime.now() + timedelta(hours=4)).isoformat(timespec='minutes')
         } for i in range(5)
     ]
 
