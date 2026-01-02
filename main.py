@@ -76,7 +76,9 @@ async def root():
     return {"status": "ok", "message": "VisionUber API is running"}
 
 @app.get("/feed", response_model=List[dict])
-async def get_feed(is_consumer: bool = Query(True, description="角色标识: True 为消费者(看供给), False 为供给者(看需求)")):
+async def get_feed(
+    is_consumer: bool = Query(True, description="角色标识: True 为消费者(看供给), False 为供给者(看需求)")
+):
     """
     根据角色返回信息流:
     - 消费者 (is_consumer=True): 看到的是周围的 [供给/服务]
@@ -100,11 +102,13 @@ async def create_entry(
     - 供给者 (is_consumer=False): 发布服务
     """
     if is_consumer:
-        print(f"接收到新需求: {item.title}")
-        return {"status": "success", "task_id": item.id}
+        details = "\n".join([f"{k}: {v}" for k, v in item.dict().items()])
+        print(f"接收到新需求:\n{details}")
+        return {"status": "success", "task_id": "task_1001"}
     else:
-        print(f"接收到新供给: {item.title}")
-        return {"status": "success", "supply_id": item.id}
+        details = "\n".join([f"{k}: {v}" for k, v in item.dict().items()])
+        print(f"接收到新供给:\n{details}")
+        return {"status": "success", "supply_id": "supply_2001"}
 
 @app.get("/search")
 async def search(
