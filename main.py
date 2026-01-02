@@ -107,13 +107,19 @@ async def create_entry(
         return {"status": "success", "supply_id": item.id}
 
 @app.get("/search")
-async def search(q: str, target: str = "task"):
+async def search(
+    q: str,
+    is_consumer: bool = Query(True, description="角色标识: True 为消费者(搜供给), False 为供给者(搜需求)")
+):
     """
     搜索功能:
-    - target='task': 搜任务库
-    - target='supply': 搜供给库
+    - 消费者 (is_consumer=True): 搜索供给库
+    - 供给者 (is_consumer=False): 搜索任务库
     """
-    return {"query": q, "target": target, "results": []}
+    if is_consumer:
+        return {"query": q, "target": "supply", "results": get_mock_supplies()}
+    else:
+        return {"query": q, "target": "task", "results": get_mock_tasks()}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8080)
