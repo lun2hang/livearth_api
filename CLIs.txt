@@ -1,2 +1,43 @@
+VENV for fastapi：
 python3 -m venv venv
 source venv/bin/activate
+
+
+Docker DB：
+
+mac docker install
+https://www.docker.com/products/docker-desktop/
+
+start Docker
+
+pull mirror and start it with postgres
+
+docker run --name vision-db \
+  -e POSTGRES_USER=admin \
+  -e POSTGRES_PASSWORD=your_password \
+  -e POSTGRES_DB=vision_uber \
+  -p 5432:5432 \
+  -d postgres
+
+docker ps  # 确认 vision-db 正在运行
+
+build table 
+
+你可以使用图形化工具（如 TablePlus）或者直接进入容器命令行：
+docker exec -it vision-db psql -U admin -d vision_uber
+
+进入后，你可以手动创建业务表（虽然后续我们推荐用 SQLModel 自动创建）：
+
+CREATE TABLE tasks (
+    id UUID PRIMARY KEY,
+    title VARCHAR(255),
+    description TEXT,
+    owner_id UUID,
+    status VARCHAR(50)
+);
+
+
+3. FastAPI 配置连接
+在你的 main.py 中，安装 sqlmodel 或 sqlalchemy 后，配置如下连接字符串：
+# 本地 Docker 连接地址
+DATABASE_URL = "postgresql://admin:your_password@localhost:5432/vision_uber"
