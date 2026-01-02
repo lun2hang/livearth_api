@@ -14,7 +14,7 @@ pull mirror and start it with postgres
 
 docker run --name vision-db \
   -e POSTGRES_USER=admin \
-  -e POSTGRES_PASSWORD=your_password \
+  -e POSTGRES_PASSWORD=admin \
   -e POSTGRES_DB=vision_uber \
   -p 5432:5432 \
   -d postgres
