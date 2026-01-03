@@ -168,6 +168,27 @@ async def search(
         results = session.exec(select(Task).where(Task.title.contains(q))).all()
         return {"query": q, "target": "task", "results": results}
 
+@app.get("/history/task", response_model=List[Task])
+async def get_task_history(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    获取当前用户的发布需求(Task)历史
+    """
+    return session.exec(select(Task).where(Task.user_id == current_user.id)).all()
+
+@app.get("/history/supply", response_model=List[Supply])
+async def get_supply_history(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    
+    """
+    获取当前用户的发布服务(Supply)历史
+    """
+    return session.exec(select(Supply).where(Supply.user_id == current_user.id)).all()
+
 @app.post("/token")
 async def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
