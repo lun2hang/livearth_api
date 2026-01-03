@@ -14,7 +14,7 @@ engine = create_engine(DATABASE_URL, echo=True)
 
 def create_db_and_tables():
     #仅用于修改数据库，清库时使用，正常使用需要注释掉
-    SQLModel.metadata.drop_all(engine)
+    #SQLModel.metadata.drop_all(engine)
     
     SQLModel.metadata.create_all(engine)
 
