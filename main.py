@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Query, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from typing import List, Optional, Union
 from pydantic import ValidationError
 from sqlmodel import Field, Session, SQLModel, create_engine, select
@@ -8,6 +8,7 @@ import uvicorn
 import uuid
 from datetime import datetime, timedelta
 import auth_utils
+from jose import jwt, JWTError
 
 app = FastAPI(title="VisionUber API")
 
@@ -69,6 +70,27 @@ class UserRegister(SQLModel):
 
 # --- API 路由 ---
 
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+async def get_current_user(token: str = Depends(oauth2_scheme), session: Session = Depends(get_session)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, auth_utils.SECRET_KEY, algorithms=[auth_utils.ALGORITHM])
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    
+    user = session.get(User, user_id)
+    if user is None:
+        raise credentials_exception
+    return user
+
 @app.on_event("startup")
 def on_startup():
     create_db_and_tables()
@@ -98,13 +120,17 @@ async def get_feed(
 async def create_entry(
     item: dict,
     is_consumer: bool = Query(True, description="角色标识: True 为消费者(发布需求), False 为供给者(发布服务)"),
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
 ):
     """
     创建发布:
     - 消费者 (is_consumer=True): 发布需求
     - 供给者 (is_consumer=False): 发布服务
     """
+    # 强制使用当前登录用户的 ID，防止伪造
+    item["user_id"] = current_user.id
+
     if is_consumer:
         try:
             task_item = Task.model_validate(item)
@@ -161,11 +187,12 @@ async def login_for_access_token(
     # 3. 生成 JWT 令牌
     access_token_expires = timedelta(minutes=auth_utils.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = auth_utils.create_access_token(
-        data={"sub": user.username}, expires_delta=access_token_expires
+        data={"sub": user.id}, expires_delta=access_token_expires
     )
     return {
         "access_token": access_token,
         "token_type": "bearer",
+        "user_id": user.id,
         "username": user.username,
         "email": user.email,
         "avatar": user.avatar
