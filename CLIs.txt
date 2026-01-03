@@ -2,6 +2,10 @@ VENV for fastapi：
 python3 -m venv venv
 source venv/bin/activate
 
+访问fastapi docs 验证服务存活和察看支持的接口
+http://10.75.193.46:8080/docs
+
+
 
 Docker DB：
 
@@ -40,4 +44,4 @@ CREATE TABLE tasks (
 3. FastAPI 配置连接
 在你的 main.py 中，安装 sqlmodel 或 sqlalchemy 后，配置如下连接字符串：
 # 本地 Docker 连接地址
-DATABASE_URL = "postgresql://admin:your_password@localhost:5432/vision_uber"
+DATABASE_URL = "postgresql://admin:admin@localhost:5432/vision_uber"

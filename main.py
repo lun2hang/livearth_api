@@ -1,29 +1,44 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Depends, HTTPException
 from typing import List, Optional, Union
-from pydantic import BaseModel, Field
+from pydantic import ValidationError
+from sqlmodel import Field, Session, SQLModel, create_engine, select
+from sqlalchemy import BigInteger
 import uvicorn
-import random
-from datetime import datetime, timedelta
 
 app = FastAPI(title="VisionUber API")
 
+# --- 数据库配置 ---
+
+DATABASE_URL = "postgresql://admin:admin@localhost:5432/vision_uber"
+engine = create_engine(DATABASE_URL, echo=True)
+
+def create_db_and_tables():
+    #仅用于修改数据库，清库时使用，正常使用需要注释掉
+    SQLModel.metadata.drop_all(engine)
+    
+    SQLModel.metadata.create_all(engine)
+
+def get_session():
+    with Session(engine) as session:
+        yield session
+
 # --- 数据模型定义 ---
 
-class Task(BaseModel):
-    id: str = Field(..., description="任务唯一ID", example="task_1001")
-    user_id: str = Field(..., description="发布者ID", example="user_888")
-    title: str = Field(..., description="任务标题", example="想看涩谷十字路口")
-    description: str = Field(None, description="详细描述", example="希望能看到现在的人流情况")
-    lat: float = Field(..., description="纬度", example=35.6595)
-    lng: float = Field(..., description="经度", example=139.7005)
-    budget: float = Field(..., description="预算", example=50.0)
+class Task(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True, sa_type=BigInteger, description="任务唯一ID")
+    user_id: str = Field(..., description="发布者ID")
+    title: str = Field(..., description="任务标题")
+    description: str = Field(None, description="详细描述")
+    lat: float = Field(..., description="纬度")
+    lng: float = Field(..., description="经度")
+    budget: float = Field(..., description="预算")
     status: str = Field("pending", description="状态: pending, matching, completed")
-    created_at: str = Field(..., example="2024-01-01T12:00:00")
-    valid_from: str = Field(..., example="2024-01-01T12:00:00")
-    valid_to: str = Field(..., example="2024-01-01T14:00:00")
+    created_at: str = Field(...)
+    valid_from: str = Field(...)
+    valid_to: str = Field(...)
 
-class Supply(BaseModel):
-    id: str
+class Supply(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True, sa_type=BigInteger)
     user_id: str
     title: str
     description: str
@@ -34,50 +49,20 @@ class Supply(BaseModel):
     valid_from: str
     valid_to: str
 
-# --- Mock 数据生成器 ---
-
-def get_mock_tasks():
-    return [
-        {
-            "id": f"task_{i}",
-            "user_id": f"user_{100+i}",
-            "title": f"我想看涩谷十字路口 #{i}",
-            "description": "希望能看到现在的人流情况，最好能拍到大屏幕。",
-            "lat": 35.6595,
-            "lng": 139.7005,
-            "budget": 10.0 + i,
-            "status": "pending",
-            "created_at": datetime.now().isoformat(),
-            "valid_from": datetime.now().isoformat(timespec='minutes'),
-            "valid_to": (datetime.now() + timedelta(hours=2)).isoformat(timespec='minutes')
-        } for i in range(5)
-    ]
-
-def get_mock_supplies():
-    return [
-        {
-            "id": f"supply_{i}",
-            "user_id": f"provider_{200+i}",
-            "title": f"提供东京涩谷直播服务 #{i}",
-            "lat": 35.6595,
-            "lng": 139.7005,
-            "rating": 4.8,
-            "description": "人在东京，专业接单，画质清晰。",
-            "created_at": datetime.now().isoformat(),
-            "valid_from": datetime.now().isoformat(timespec='minutes'),
-            "valid_to": (datetime.now() + timedelta(hours=4)).isoformat(timespec='minutes')
-        } for i in range(5)
-    ]
-
 # --- API 路由 ---
+
+@app.on_event("startup")
+def on_startup():
+    create_db_and_tables()
 
 @app.get("/")
 async def root():
     return {"status": "ok", "message": "VisionUber API is running"}
 
-@app.get("/feed", response_model=List[dict])
+@app.get("/feed", response_model=List[Union[Supply, Task]])
 async def get_feed(
-    is_consumer: bool = Query(True, description="角色标识: True 为消费者(看供给), False 为供给者(看需求)")
+    is_consumer: bool = Query(True, description="角色标识: True 为消费者(看供给), False 为供给者(看需求)"),
+    session: Session = Depends(get_session)
 ):
     """
     根据角色返回信息流:
@@ -86,15 +71,16 @@ async def get_feed(
     """
     if is_consumer:
         # 消费者看“谁能帮我看”
-        return get_mock_supplies()
+        return session.exec(select(Supply)).all()
     else:
         # 供给者看“谁想看什么”
-        return get_mock_tasks()
+        return session.exec(select(Task)).all()
 
 @app.post("/create")
 async def create_entry(
-    item: Union[Task, Supply],
-    is_consumer: bool = Query(True, description="角色标识: True 为消费者(发布需求), False 为供给者(发布服务)")
+    item: dict,
+    is_consumer: bool = Query(True, description="角色标识: True 为消费者(发布需求), False 为供给者(发布服务)"),
+    session: Session = Depends(get_session)
 ):
     """
     创建发布:
@@ -102,18 +88,29 @@ async def create_entry(
     - 供给者 (is_consumer=False): 发布服务
     """
     if is_consumer:
-        details = "\n".join([f"{k}: {v}" for k, v in item.dict().items()])
-        print(f"接收到新需求:\n{details}")
-        return {"status": "success", "task_id": "task_1001"}
+        try:
+            task_item = Task.model_validate(item)
+            session.add(task_item)
+            session.commit()
+            session.refresh(task_item)
+            return {"status": "success", "task_id": task_item.id}
+        except ValidationError as e:
+            raise HTTPException(status_code=400, detail=f"数据格式错误 (期望 Task): {e}")
     else:
-        details = "\n".join([f"{k}: {v}" for k, v in item.dict().items()])
-        print(f"接收到新供给:\n{details}")
-        return {"status": "success", "supply_id": "supply_2001"}
+        try:
+            supply_item = Supply.model_validate(item)
+            session.add(supply_item)
+            session.commit()
+            session.refresh(supply_item)
+            return {"status": "success", "supply_id": supply_item.id}
+        except ValidationError as e:
+            raise HTTPException(status_code=400, detail=f"数据格式错误 (期望 Supply): {e}")
 
 @app.get("/search")
 async def search(
     q: str,
-    is_consumer: bool = Query(True, description="角色标识: True 为消费者(搜供给), False 为供给者(搜需求)")
+    is_consumer: bool = Query(True, description="角色标识: True 为消费者(搜供给), False 为供给者(搜需求)"),
+    session: Session = Depends(get_session)
 ):
     """
     搜索功能:
@@ -121,9 +118,11 @@ async def search(
     - 供给者 (is_consumer=False): 搜索任务库
     """
     if is_consumer:
-        return {"query": q, "target": "supply", "results": get_mock_supplies()}
+        results = session.exec(select(Supply).where(Supply.title.contains(q))).all()
+        return {"query": q, "target": "supply", "results": results}
     else:
-        return {"query": q, "target": "task", "results": get_mock_tasks()}
+        results = session.exec(select(Task).where(Task.title.contains(q))).all()
+        return {"query": q, "target": "task", "results": results}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8080)
