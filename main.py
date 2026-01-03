@@ -1,9 +1,13 @@
-from fastapi import FastAPI, Query, Depends, HTTPException
+from fastapi import FastAPI, Query, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
 from typing import List, Optional, Union
 from pydantic import ValidationError
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 from sqlalchemy import BigInteger
 import uvicorn
+import uuid
+from datetime import datetime, timedelta
+import auth_utils
 
 app = FastAPI(title="VisionUber API")
 
@@ -48,6 +52,20 @@ class Supply(SQLModel, table=True):
     created_at: str
     valid_from: str
     valid_to: str
+
+class User(SQLModel, table=True):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True, description="用户唯一ID")
+    username: str = Field(index=True, unique=True, description="用户名")
+    email: str = Field(index=True, unique=True, description="邮箱")
+    hashed_password: str = Field(..., description="加密后的密码")
+    avatar: Optional[str] = Field(None, description="头像URL")
+    status: str = Field(default="active", description="账号状态: active, suspended")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class UserRegister(SQLModel):
+    username: str = Field(..., description="用户名")
+    email: str = Field(..., description="邮箱")
+    password: str = Field(..., description="密码")
 
 # --- API 路由 ---
 
@@ -123,6 +141,57 @@ async def search(
     else:
         results = session.exec(select(Task).where(Task.title.contains(q))).all()
         return {"query": q, "target": "task", "results": results}
+
+@app.post("/token")
+async def login_for_access_token(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    session: Session = Depends(get_session)
+):
+    # 1. 查询用户
+    user = session.exec(select(User).where(User.username == form_data.username)).first()
+    
+    # 2. 验证用户是否存在及密码是否正确
+    if not user or not auth_utils.verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # 3. 生成 JWT 令牌
+    access_token_expires = timedelta(minutes=auth_utils.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = auth_utils.create_access_token(
+        data={"sub": user.username}, expires_delta=access_token_expires
+    )
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "username": user.username,
+        "email": user.email,
+        "avatar": user.avatar
+    }
+
+@app.post("/register")
+async def register(
+    user_in: UserRegister,
+    session: Session = Depends(get_session)
+):
+    # 1. 检查用户名或邮箱是否已存在
+    existing_user = session.exec(select(User).where((User.username == user_in.username) | (User.email == user_in.email))).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Username or email already registered")
+    
+    # 2. 加密密码并创建用户
+    hashed_password = auth_utils.get_password_hash(user_in.password)
+    db_user = User(
+        username=user_in.username,
+        email=user_in.email,
+        hashed_password=hashed_password
+    )
+    session.add(db_user)
+    session.commit()
+    session.refresh(db_user)
+    return {"status": "success", "user_id": db_user.id, "username": db_user.username}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8080)
