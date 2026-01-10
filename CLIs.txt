@@ -45,3 +45,5 @@ CREATE TABLE tasks (
 在你的 main.py 中，安装 sqlmodel 或 sqlalchemy 后，配置如下连接字符串：
 # 本地 Docker 连接地址
 DATABASE_URL = "postgresql://admin:admin@localhost:5432/vision_uber"
+
+FB GG 的开发者帐号都是hotmail，APP用的163.com的美区账户

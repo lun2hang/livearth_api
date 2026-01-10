@@ -11,6 +11,7 @@ import json
 from datetime import datetime, timedelta
 import auth_utils
 from jose import jwt, JWTError
+import math
 
 app = FastAPI(title="VisionUber API")
 
@@ -111,6 +112,15 @@ async def get_current_user(token: str = Depends(oauth2_scheme), session: Session
 def on_startup():
     create_db_and_tables()
 
+def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """计算两点间的哈弗辛距离 (km)"""
+    R = 6371  # 地球半径 (km)
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2)**2
+    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
 @app.get("/")
 async def root():
     return {"status": "ok", "message": "VisionUber API is running"}
@@ -118,6 +128,8 @@ async def root():
 @app.get("/feed", response_model=List[Union[Supply, Task]])
 async def get_feed(
     is_consumer: bool = Query(True, description="角色标识: True 为消费者(看供给), False 为供给者(看需求)"),
+    user_lat: Optional[float] = Query(None, description="用户当前纬度"),
+    user_lng: Optional[float] = Query(None, description="用户当前经度"),
     session: Session = Depends(get_session)
 ):
     """
@@ -127,10 +139,14 @@ async def get_feed(
     """
     if is_consumer:
         # 消费者看“谁能帮我看”
-        return session.exec(select(Supply)).all()
+        items = session.exec(select(Supply)).all()
     else:
         # 供给者看“谁想看什么”
-        return session.exec(select(Task)).all()
+        items = session.exec(select(Task)).all()
+        if user_lat is not None and user_lng is not None:
+            items = sorted(items, key=lambda x: haversine_distance(user_lat, user_lng, x.lat, x.lng))
+        
+    return items
 
 @app.post("/create")
 async def create_entry(
@@ -170,6 +186,8 @@ async def create_entry(
 async def search(
     q: str,
     is_consumer: bool = Query(True, description="角色标识: True 为消费者(搜供给), False 为供给者(搜需求)"),
+    user_lat: Optional[float] = Query(None, description="用户当前纬度"),
+    user_lng: Optional[float] = Query(None, description="用户当前经度"),
     session: Session = Depends(get_session)
 ):
     """
@@ -178,11 +196,15 @@ async def search(
     - 供给者 (is_consumer=False): 搜索任务库
     """
     if is_consumer:
-        results = session.exec(select(Supply).where(Supply.title.contains(q))).all()
-        return {"query": q, "target": "supply", "results": results}
+        results = session.exec(select(Supply).where(Supply.title.contains(q)).order_by(Supply.rating.desc())).all()
+        target = "supply"
     else:
         results = session.exec(select(Task).where(Task.title.contains(q))).all()
-        return {"query": q, "target": "task", "results": results}
+        target = "task"
+        if user_lat is not None and user_lng is not None:
+            results = sorted(results, key=lambda x: haversine_distance(user_lat, user_lng, x.lat, x.lng))
+
+    return {"query": q, "target": target, "results": results}
 
 @app.get("/history/task", response_model=List[Task])
 async def get_task_history(
