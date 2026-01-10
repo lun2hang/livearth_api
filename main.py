@@ -2,10 +2,12 @@ from fastapi import FastAPI, Query, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from typing import List, Optional, Union
 from pydantic import ValidationError
-from sqlmodel import Field, Session, SQLModel, create_engine, select
+from sqlmodel import Field, Session, SQLModel, create_engine, select, Relationship
 from sqlalchemy import BigInteger
 import uvicorn
 import uuid
+import urllib.request
+import json
 from datetime import datetime, timedelta
 import auth_utils
 from jose import jwt, JWTError
@@ -54,19 +56,33 @@ class Supply(SQLModel, table=True):
     valid_from: str
     valid_to: str
 
+class SocialAccount(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    provider: str = Field(index=True) # "google", "apple"
+    provider_user_id: str = Field(index=True) # Google 里的 sub ID
+    user_id: str = Field(foreign_key="user.id")
+    user: Optional["User"] = Relationship(back_populates="social_accounts")
+
 class User(SQLModel, table=True):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True, description="用户唯一ID")
     username: str = Field(index=True, unique=True, description="用户名")
     email: str = Field(index=True, unique=True, description="邮箱")
-    hashed_password: str = Field(..., description="加密后的密码")
+    hashed_password: Optional[str] = Field(None, description="加密后的密码")
     avatar: Optional[str] = Field(None, description="头像URL")
     status: str = Field(default="active", description="账号状态: active, suspended")
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # 关联多个三方账号
+    social_accounts: List[SocialAccount] = Relationship(back_populates="user")
 
 class UserRegister(SQLModel):
     username: str = Field(..., description="用户名")
     email: str = Field(..., description="邮箱")
     password: str = Field(..., description="密码")
+
+class SocialLoginRequest(SQLModel):
+    provider: str
+    token: str
 
 # --- API 路由 ---
 
@@ -189,16 +205,85 @@ async def get_supply_history(
     """
     return session.exec(select(Supply).where(Supply.user_id == current_user.id)).all()
 
+def verify_google_token(token: str) -> dict:
+    """
+    验证 Google ID Token。
+    生产环境建议使用 google-auth 库，这里使用标准 HTTP 请求以减少依赖。
+    """
+    url = f"https://oauth2.googleapis.com/tokeninfo?id_token={token}"
+    try:
+        with urllib.request.urlopen(url) as response:
+            if response.status != 200:
+                raise HTTPException(status_code=400, detail="Invalid Google token")
+            data = json.loads(response.read().decode())
+            if "sub" not in data:
+                 raise HTTPException(status_code=400, detail="Invalid Google token payload")
+            return data
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Token verification failed: {str(e)}")
+
+@app.post("/auth/social-login")
+async def social_login(
+    req: SocialLoginRequest,
+    session: Session = Depends(get_session)
+):
+    if req.provider != "google":
+        raise HTTPException(status_code=400, detail="Currently only 'google' is supported")
+
+    # 1. 验证身份 (向 Google 验证)
+    ext_user_info = verify_google_token(req.token)
+    provider_user_id = ext_user_info["sub"]
+    email = ext_user_info.get("email")
+    name = ext_user_info.get("name", "")
+    picture = ext_user_info.get("picture", None)
+
+    if not email:
+        raise HTTPException(status_code=400, detail="Email not found in token")
+
+    # 2. 匹配或创建账号 (影子账号逻辑)
+    # A. 查关联表 SocialAccount
+    social_acc = session.exec(select(SocialAccount).where(
+        SocialAccount.provider == req.provider,
+        SocialAccount.provider_user_id == provider_user_id
+    )).first()
+
+    user = None
+    if social_acc:
+        user = session.get(User, social_acc.user_id)
+    else:
+        # B. 没绑定过，查 User 表看 email 是否存在 (账号合并逻辑)
+        user = session.exec(select(User).where(User.email == email)).first()
+        if not user:
+            # C. 彻底的新用户，创建 User
+            # 生成一个随机或基于邮箱的用户名
+            base_username = email.split("@")[0]
+            new_username = f"{base_username}_{str(uuid.uuid4())[:4]}"
+            user = User(username=new_username, email=email, hashed_password=None, avatar=picture)
+            session.add(user)
+            session.commit()
+            session.refresh(user)
+        
+        # D. 建立关联关系
+        new_social = SocialAccount(provider=req.provider, provider_user_id=provider_user_id, user_id=user.id)
+        session.add(new_social)
+        session.commit()
+
+    # 3. 发放系统 JWT
+    access_token = auth_utils.create_access_token(data={"sub": user.id})
+    return {"access_token": access_token, "token_type": "bearer", "user_id": user.id, "username": user.username, "email": user.email, "avatar": user.avatar}
+
 @app.post("/token")
 async def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
     session: Session = Depends(get_session)
 ):
     # 1. 查询用户
-    user = session.exec(select(User).where(User.username == form_data.username)).first()
+    user = session.exec(select(User).where(
+        (User.username == form_data.username) | (User.email == form_data.username)
+    )).first()
     
     # 2. 验证用户是否存在及密码是否正确
-    if not user or not auth_utils.verify_password(form_data.password, user.hashed_password):
+    if not user or not user.hashed_password or not auth_utils.verify_password(form_data.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",

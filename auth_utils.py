@@ -6,7 +6,7 @@ from jose import jwt
 # 密钥配置 (生产环境请务必使用环境变量管理)
 SECRET_KEY = "YOUR_SUPER_SECRET_KEY_CHANGE_THIS"
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7天
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
