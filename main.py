@@ -222,16 +222,75 @@ def verify_google_token(token: str) -> dict:
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Token verification failed: {str(e)}")
 
+def verify_facebook_token(token: str) -> dict:
+    """
+    验证 Facebook Access Token
+    """
+    url = f"https://graph.facebook.com/me?access_token={token}&fields=id,name,email,picture"
+    try:
+        with urllib.request.urlopen(url) as response:
+            if response.status != 200:
+                raise HTTPException(status_code=400, detail="Invalid Facebook token")
+            data = json.loads(response.read().decode())
+            
+            # 映射 Facebook 字段到系统标准字段
+            return {
+                "sub": data["id"],
+                "email": data.get("email"),
+                "name": data.get("name"),
+                "picture": data.get("picture", {}).get("data", {}).get("url")
+            }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Facebook verification failed: {str(e)}")
+
+def verify_apple_token(token: str) -> dict:
+    """
+    验证 Apple ID Token (JWT)
+    """
+    keys_url = "https://appleid.apple.com/auth/keys"
+    try:
+        # 1. 获取 Token Header 中的 kid
+        header = jwt.get_unverified_header(token)
+        kid = header.get("kid")
+        
+        # 2. 获取 Apple 公钥集
+        with urllib.request.urlopen(keys_url) as response:
+            jwks = json.loads(response.read().decode())
+            
+        # 3. 验证并解码
+        # 注意：生产环境应验证 aud (client_id)，这里为通用性暂时跳过 aud 验证
+        payload = jwt.decode(
+            token,
+            jwks,
+            algorithms=["RS256"],
+            options={"verify_aud": False} 
+        )
+        
+        return {
+            "sub": payload["sub"],
+            "email": payload.get("email"),
+            "name": payload.get("name"), # Apple Token 仅在首次授权时包含 name
+            "picture": None
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Apple verification failed: {str(e)}")
+
 @app.post("/auth/social-login")
 async def social_login(
     req: SocialLoginRequest,
     session: Session = Depends(get_session)
 ):
-    if req.provider != "google":
-        raise HTTPException(status_code=400, detail="Currently only 'google' is supported")
+    if req.provider not in ["google", "facebook", "apple"]:
+        raise HTTPException(status_code=400, detail=f"Provider '{req.provider}' is not supported")
 
-    # 1. 验证身份 (向 Google 验证)
-    ext_user_info = verify_google_token(req.token)
+    # 1. 验证身份 (分发到对应的验证函数)
+    if req.provider == "google":
+        ext_user_info = verify_google_token(req.token)
+    elif req.provider == "facebook":
+        ext_user_info = verify_facebook_token(req.token)
+    elif req.provider == "apple":
+        ext_user_info = verify_apple_token(req.token)
+    
     provider_user_id = ext_user_info["sub"]
     email = ext_user_info.get("email")
     name = ext_user_info.get("name", "")
