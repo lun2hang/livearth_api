@@ -22,7 +22,7 @@ engine = create_engine(DATABASE_URL, echo=True)
 
 def create_db_and_tables():
     #仅用于修改数据库，清库时使用，正常使用需要注释掉
-    #SQLModel.metadata.drop_all(engine)
+    SQLModel.metadata.drop_all(engine)
     
     SQLModel.metadata.create_all(engine)
 
@@ -53,6 +53,8 @@ class Supply(SQLModel, table=True):
     lat: float
     lng: float
     rating: float
+    price: float = Field(default=0.0, description="价格")
+    status: str = Field(default="active", description="状态: active, booked, completed")
     created_at: str
     valid_from: str
     valid_to: str
@@ -75,6 +77,16 @@ class User(SQLModel, table=True):
     
     # 关联多个三方账号
     social_accounts: List[SocialAccount] = Relationship(back_populates="user")
+
+class Order(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True, sa_type=BigInteger, description="订单ID")
+    consumer_id: str = Field(..., description="消费者ID", index=True)
+    provider_id: str = Field(..., description="服务者ID", index=True)
+    task_id: Optional[int] = Field(default=None, description="关联的需求ID")
+    supply_id: Optional[int] = Field(default=None, description="关联的供给ID")
+    amount: float = Field(..., description="交易金额")
+    status: str = Field(default="created", description="状态: created, in_progress, completed, cancelled")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 class UserRegister(SQLModel):
     username: str = Field(..., description="用户名")
@@ -406,6 +418,93 @@ async def register(
     session.commit()
     session.refresh(db_user)
     return {"status": "success", "user_id": db_user.id, "username": db_user.username}
+
+# --- 订单系统路由 ---
+
+@app.post("/orders/task/{task_id}/accept")
+async def accept_task(
+    task_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    供给者接单: 供给者接受消费者的需求 (Task)
+    """
+    task = session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="Cannot accept your own task")
+    if task.status != "pending":
+        raise HTTPException(status_code=400, detail="Task is not pending")
+
+    # 创建订单
+    order = Order(
+        consumer_id=task.user_id,
+        provider_id=current_user.id,
+        task_id=task.id,
+        amount=task.budget,
+        status="in_progress" # 接单即开始
+    )
+    
+    # 更新任务状态
+    task.status = "matching"
+    
+    session.add(order)
+    session.add(task)
+    session.commit()
+    session.refresh(order)
+    return {"status": "success", "order_id": order.id, "message": "Task accepted"}
+
+@app.post("/orders/supply/{supply_id}/book")
+async def book_supply(
+    supply_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    消费者下单: 消费者预订供给者的服务 (Supply)
+    """
+    supply = session.get(Supply, supply_id)
+    if not supply:
+        raise HTTPException(status_code=404, detail="Supply not found")
+    if supply.user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="Cannot book your own supply")
+    
+    if supply.status != "active":
+        raise HTTPException(status_code=400, detail="Supply is not active")
+
+    # 创建订单
+    order = Order(
+        consumer_id=current_user.id,
+        provider_id=supply.user_id,
+        supply_id=supply.id,
+        amount=supply.price,
+        status="created" # 待确认或直接开始，这里假设创建即待服务
+    )
+    
+    # 更新供给状态
+    supply.status = "booked"
+    session.add(supply)
+    
+    session.add(order)
+    session.commit()
+    session.refresh(order)
+    return {"status": "success", "order_id": order.id, "message": "Supply booked"}
+
+@app.get("/orders", response_model=List[Order])
+async def get_orders(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    获取当前用户的订单列表 (作为消费者或供给者)
+    """
+    statement = select(Order).where(
+        (Order.consumer_id == current_user.id) | 
+        (Order.provider_id == current_user.id)
+    ).order_by(Order.created_at.desc())
+    return session.exec(statement).all()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8080)
