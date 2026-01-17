@@ -4,6 +4,7 @@ from typing import List, Optional, Union
 from pydantic import ValidationError
 from sqlmodel import Field, Session, SQLModel, create_engine, select, Relationship
 from sqlalchemy import BigInteger
+from sqlalchemy.orm import aliased
 import uvicorn
 import uuid
 import urllib.request
@@ -22,7 +23,7 @@ engine = create_engine(DATABASE_URL, echo=True)
 
 def create_db_and_tables():
     #仅用于修改数据库，清库时使用，正常使用需要注释掉
-    SQLModel.metadata.drop_all(engine)
+    #SQLModel.metadata.drop_all(engine)
     
     SQLModel.metadata.create_all(engine)
 
@@ -82,11 +83,26 @@ class Order(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True, sa_type=BigInteger, description="订单ID")
     consumer_id: str = Field(..., description="消费者ID", index=True)
     provider_id: str = Field(..., description="服务者ID", index=True)
-    task_id: Optional[int] = Field(default=None, description="关联的需求ID")
-    supply_id: Optional[int] = Field(default=None, description="关联的供给ID")
+    task_id: Optional[int] = Field(default=None, description="关联的需求ID", sa_type=BigInteger)
+    supply_id: Optional[int] = Field(default=None, description="关联的供给ID", sa_type=BigInteger)
     amount: float = Field(..., description="交易金额")
     status: str = Field(default="created", description="状态: created, in_progress, completed, cancelled")
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class UserInfo(SQLModel):
+    id: str
+    username: str
+    avatar: Optional[str] = None
+
+class OrderWithDetails(SQLModel):
+    id: int
+    consumer: UserInfo
+    provider: UserInfo
+    task_id: Optional[int] = None
+    supply_id: Optional[int] = None
+    amount: float
+    status: str
+    created_at: datetime
 
 class UserRegister(SQLModel):
     username: str = Field(..., description="用户名")
@@ -492,19 +508,41 @@ async def book_supply(
     session.refresh(order)
     return {"status": "success", "order_id": order.id, "message": "Supply booked"}
 
-@app.get("/orders", response_model=List[Order])
+@app.get("/orders", response_model=List[OrderWithDetails])
 async def get_orders(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
     """
-    获取当前用户的订单列表 (作为消费者或供给者)
+    获取当前用户的订单列表 (作为消费者或供给者)，包含用户信息
     """
-    statement = select(Order).where(
+    Consumer = aliased(User)
+    Provider = aliased(User)
+
+    statement = select(Order, Consumer, Provider).join(
+        Consumer, Order.consumer_id == Consumer.id
+    ).join(
+        Provider, Order.provider_id == Provider.id
+    ).where(
         (Order.consumer_id == current_user.id) | 
         (Order.provider_id == current_user.id)
     ).order_by(Order.created_at.desc())
-    return session.exec(statement).all()
+    
+    results = session.exec(statement).all()
+    
+    orders_data = []
+    for order, consumer, provider in results:
+        orders_data.append(OrderWithDetails(
+            id=order.id,
+            consumer=UserInfo(id=consumer.id, username=consumer.username, avatar=consumer.avatar),
+            provider=UserInfo(id=provider.id, username=provider.username, avatar=provider.avatar),
+            task_id=order.task_id,
+            supply_id=order.supply_id,
+            amount=order.amount,
+            status=order.status,
+            created_at=order.created_at
+        ))
+    return orders_data
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8080)
