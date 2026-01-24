@@ -41,7 +41,7 @@ class Task(SQLModel, table=True):
     lat: float = Field(..., description="纬度")
     lng: float = Field(..., description="经度")
     budget: float = Field(..., description="预算")
-    status: str = Field("pending", description="状态: pending, matching, completed")
+    status: str = Field("created", description="状态: created, matched, live_start, live_end, paied, canceled, timeout")
     created_at: str = Field(...)
     valid_from: str = Field(...)
     valid_to: str = Field(...)
@@ -55,7 +55,7 @@ class Supply(SQLModel, table=True):
     lng: float
     rating: float
     price: float = Field(default=0.0, description="价格")
-    status: str = Field(default="active", description="状态: active, booked, completed")
+    status: str = Field(default="created", description="状态: created, matched, live_start, live_end, paied, canceled, timeout")
     created_at: str
     valid_from: str
     valid_to: str
@@ -86,7 +86,7 @@ class Order(SQLModel, table=True):
     task_id: Optional[int] = Field(default=None, description="关联的需求ID", sa_type=BigInteger)
     supply_id: Optional[int] = Field(default=None, description="关联的供给ID", sa_type=BigInteger)
     amount: float = Field(..., description="交易金额")
-    status: str = Field(default="created", description="状态: created, in_progress, completed, cancelled")
+    status: str = Field(default="created", description="状态: created, live_start, live_end, paied, canceled, timeout")
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 class UserInfo(SQLModel):
@@ -103,6 +103,7 @@ class OrderWithDetails(SQLModel):
     amount: float
     status: str
     created_at: datetime
+    start_time: Optional[str] = None
 
 class UserRegister(SQLModel):
     username: str = Field(..., description="用户名")
@@ -165,12 +166,14 @@ async def get_feed(
     - 消费者 (is_consumer=True): 看到的是周围的 [供给/服务]
     - 供给者 (is_consumer=False): 看到的是周围的 [任务/需求]
     """
+    now_str = datetime.utcnow().isoformat()
+
     if is_consumer:
         # 消费者看“谁能帮我看”
-        items = session.exec(select(Supply)).all()
+        items = session.exec(select(Supply).where(Supply.status == "created").where(Supply.valid_to > now_str)).all()
     else:
         # 供给者看“谁想看什么”
-        items = session.exec(select(Task)).all()
+        items = session.exec(select(Task).where(Task.status == "created").where(Task.valid_to > now_str)).all()
         if user_lat is not None and user_lng is not None:
             items = sorted(items, key=lambda x: haversine_distance(user_lat, user_lng, x.lat, x.lng))
         
@@ -190,6 +193,9 @@ async def create_entry(
     """
     # 强制使用当前登录用户的 ID，防止伪造
     item["user_id"] = current_user.id
+
+    # 强制设置状态为 created，忽略前端传入的状态
+    item["status"] = "created"
 
     if is_consumer:
         try:
@@ -223,11 +229,13 @@ async def search(
     - 消费者 (is_consumer=True): 搜索供给库
     - 供给者 (is_consumer=False): 搜索任务库
     """
+    now_str = datetime.utcnow().isoformat()
+
     if is_consumer:
-        results = session.exec(select(Supply).where(Supply.title.contains(q)).order_by(Supply.rating.desc())).all()
+        results = session.exec(select(Supply).where(Supply.title.contains(q)).where(Supply.status == "created").where(Supply.valid_to > now_str).order_by(Supply.rating.desc())).all()
         target = "supply"
     else:
-        results = session.exec(select(Task).where(Task.title.contains(q))).all()
+        results = session.exec(select(Task).where(Task.title.contains(q)).where(Task.status == "created").where(Task.valid_to > now_str)).all()
         target = "task"
         if user_lat is not None and user_lng is not None:
             results = sorted(results, key=lambda x: haversine_distance(user_lat, user_lng, x.lat, x.lng))
@@ -242,7 +250,17 @@ async def get_task_history(
     """
     获取当前用户的发布需求(Task)历史
     """
-    return session.exec(select(Task).where(Task.user_id == current_user.id)).all()
+    tasks = session.exec(select(Task).where(Task.user_id == current_user.id)).all()
+    
+    # 惰性计算 (Lazy Evaluation):
+    # 数据库中保留原始状态，但在返回给前端时，根据时间判断是否已超时。
+    # 这样既不需要高频写数据库，又能让用户看到正确的状态。
+    now_str = datetime.utcnow().isoformat()
+    for task in tasks:
+        if task.status == "created" and task.valid_to < now_str:
+            task.status = "timeout" # 仅修改内存对象，不写入数据库
+            
+    return tasks
 
 @app.get("/history/supply", response_model=List[Supply])
 async def get_supply_history(
@@ -253,7 +271,14 @@ async def get_supply_history(
     """
     获取当前用户的发布服务(Supply)历史
     """
-    return session.exec(select(Supply).where(Supply.user_id == current_user.id)).all()
+    supplies = session.exec(select(Supply).where(Supply.user_id == current_user.id)).all()
+    
+    now_str = datetime.utcnow().isoformat()
+    for supply in supplies:
+        if supply.status == "created" and supply.valid_to < now_str:
+            supply.status = "timeout"
+            
+    return supplies
 
 def verify_google_token(token: str) -> dict:
     """
@@ -451,8 +476,13 @@ async def accept_task(
         raise HTTPException(status_code=404, detail="Task not found")
     if task.user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot accept your own task")
-    if task.status != "pending":
-        raise HTTPException(status_code=400, detail="Task is not pending")
+    if task.status != "created":
+        raise HTTPException(status_code=400, detail="Task is not created")
+
+    # 双重校验（Double Check）：
+    # 即使列表接口过滤了过期数据，用户可能在页面停留过久导致数据过期，或通过 API 直接调用，因此必须在写入前再次检查
+    if task.valid_to < datetime.utcnow().isoformat():
+        raise HTTPException(status_code=400, detail="Task has expired")
 
     # 创建订单
     order = Order(
@@ -460,17 +490,17 @@ async def accept_task(
         provider_id=current_user.id,
         task_id=task.id,
         amount=task.budget,
-        status="in_progress" # 接单即开始
+        status="created" # 接单即开始
     )
     
     # 更新任务状态
-    task.status = "matching"
+    task.status = "matched"
     
     session.add(order)
     session.add(task)
     session.commit()
     session.refresh(order)
-    return {"status": "success", "order_id": order.id, "message": "Task accepted"}
+    return {"status": "success", "order_id": order.id, "message": "Task accepted", "start_time": task.valid_from}
 
 @app.post("/orders/supply/{supply_id}/book")
 async def book_supply(
@@ -487,8 +517,13 @@ async def book_supply(
     if supply.user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot book your own supply")
     
-    if supply.status != "active":
-        raise HTTPException(status_code=400, detail="Supply is not active")
+    if supply.status != "created":
+        raise HTTPException(status_code=400, detail="Supply is not created")
+
+    # 双重校验（Double Check）：
+    # 防止并发情况下的过期接单（如用户在 09:59 加载页面，在 10:01 点击下单，而过期时间是 10:00）
+    if supply.valid_to < datetime.utcnow().isoformat():
+        raise HTTPException(status_code=400, detail="Supply has expired")
 
     # 创建订单
     order = Order(
@@ -500,13 +535,13 @@ async def book_supply(
     )
     
     # 更新供给状态
-    supply.status = "booked"
+    supply.status = "matched"
     session.add(supply)
     
     session.add(order)
     session.commit()
     session.refresh(order)
-    return {"status": "success", "order_id": order.id, "message": "Supply booked"}
+    return {"status": "success", "order_id": order.id, "message": "Supply booked", "start_time": supply.valid_from}
 
 @app.get("/orders", response_model=List[OrderWithDetails])
 async def get_orders(
@@ -519,10 +554,14 @@ async def get_orders(
     Consumer = aliased(User)
     Provider = aliased(User)
 
-    statement = select(Order, Consumer, Provider).join(
+    statement = select(Order, Consumer, Provider, Task, Supply).join(
         Consumer, Order.consumer_id == Consumer.id
     ).join(
         Provider, Order.provider_id == Provider.id
+    ).outerjoin(
+        Task, Order.task_id == Task.id
+    ).outerjoin(
+        Supply, Order.supply_id == Supply.id
     ).where(
         (Order.consumer_id == current_user.id) | 
         (Order.provider_id == current_user.id)
@@ -530,8 +569,23 @@ async def get_orders(
     
     results = session.exec(statement).all()
     
+    now_str = datetime.utcnow().isoformat()
     orders_data = []
-    for order, consumer, provider in results:
+    for order, consumer, provider, task, supply in results:
+        # 惰性计算 (Lazy Evaluation):
+        # 如果订单处于 created 状态，但关联的任务或供给已过期，则显示为 timeout
+        if order.status == "created":
+            if task and task.valid_to < now_str:
+                order.status = "timeout"
+            elif supply and supply.valid_to < now_str:
+                order.status = "timeout"
+
+        start_time = None
+        if task:
+            start_time = task.valid_from
+        elif supply:
+            start_time = supply.valid_from
+
         orders_data.append(OrderWithDetails(
             id=order.id,
             consumer=UserInfo(id=consumer.id, username=consumer.username, avatar=consumer.avatar),
@@ -540,7 +594,8 @@ async def get_orders(
             supply_id=order.supply_id,
             amount=order.amount,
             status=order.status,
-            created_at=order.created_at
+            created_at=order.created_at,
+            start_time=start_time
         ))
     return orders_data
 
