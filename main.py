@@ -42,9 +42,9 @@ class Task(SQLModel, table=True):
     lng: float = Field(..., description="经度")
     budget: float = Field(..., description="预算")
     status: str = Field("created", description="状态: created, matched, live_start, live_end, paied, canceled, timeout")
-    created_at: str = Field(...)
-    valid_from: str = Field(...)
-    valid_to: str = Field(...)
+    created_at: datetime = Field(...)
+    valid_from: datetime = Field(...)
+    valid_to: datetime = Field(...)
 
 class Supply(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True, sa_type=BigInteger)
@@ -56,9 +56,9 @@ class Supply(SQLModel, table=True):
     rating: float
     price: float = Field(default=0.0, description="价格")
     status: str = Field(default="created", description="状态: created, matched, live_start, live_end, paied, canceled, timeout")
-    created_at: str
-    valid_from: str
-    valid_to: str
+    created_at: datetime
+    valid_from: datetime
+    valid_to: datetime
 
 class SocialAccount(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -103,7 +103,7 @@ class OrderWithDetails(SQLModel):
     amount: float
     status: str
     created_at: datetime
-    start_time: Optional[str] = None
+    start_time: Optional[datetime] = None
 
 class UserRegister(SQLModel):
     username: str = Field(..., description="用户名")
@@ -166,14 +166,14 @@ async def get_feed(
     - 消费者 (is_consumer=True): 看到的是周围的 [供给/服务]
     - 供给者 (is_consumer=False): 看到的是周围的 [任务/需求]
     """
-    now_str = datetime.utcnow().isoformat()
+    now = datetime.utcnow()
 
     if is_consumer:
         # 消费者看“谁能帮我看”
-        items = session.exec(select(Supply).where(Supply.status == "created").where(Supply.valid_to > now_str)).all()
+        items = session.exec(select(Supply).where(Supply.status == "created").where(Supply.valid_to > now)).all()
     else:
         # 供给者看“谁想看什么”
-        items = session.exec(select(Task).where(Task.status == "created").where(Task.valid_to > now_str)).all()
+        items = session.exec(select(Task).where(Task.status == "created").where(Task.valid_to > now)).all()
         if user_lat is not None and user_lng is not None:
             items = sorted(items, key=lambda x: haversine_distance(user_lat, user_lng, x.lat, x.lng))
         
@@ -229,13 +229,13 @@ async def search(
     - 消费者 (is_consumer=True): 搜索供给库
     - 供给者 (is_consumer=False): 搜索任务库
     """
-    now_str = datetime.utcnow().isoformat()
+    now = datetime.utcnow()
 
     if is_consumer:
-        results = session.exec(select(Supply).where(Supply.title.contains(q)).where(Supply.status == "created").where(Supply.valid_to > now_str).order_by(Supply.rating.desc())).all()
+        results = session.exec(select(Supply).where(Supply.title.contains(q)).where(Supply.status == "created").where(Supply.valid_to > now).order_by(Supply.rating.desc())).all()
         target = "supply"
     else:
-        results = session.exec(select(Task).where(Task.title.contains(q)).where(Task.status == "created").where(Task.valid_to > now_str)).all()
+        results = session.exec(select(Task).where(Task.title.contains(q)).where(Task.status == "created").where(Task.valid_to > now)).all()
         target = "task"
         if user_lat is not None and user_lng is not None:
             results = sorted(results, key=lambda x: haversine_distance(user_lat, user_lng, x.lat, x.lng))
@@ -255,9 +255,9 @@ async def get_task_history(
     # 惰性计算 (Lazy Evaluation):
     # 数据库中保留原始状态，但在返回给前端时，根据时间判断是否已超时。
     # 这样既不需要高频写数据库，又能让用户看到正确的状态。
-    now_str = datetime.utcnow().isoformat()
+    now = datetime.utcnow()
     for task in tasks:
-        if task.status == "created" and task.valid_to < now_str:
+        if task.status == "created" and task.valid_to < now:
             task.status = "timeout" # 仅修改内存对象，不写入数据库
             
     return tasks
@@ -273,9 +273,9 @@ async def get_supply_history(
     """
     supplies = session.exec(select(Supply).where(Supply.user_id == current_user.id)).all()
     
-    now_str = datetime.utcnow().isoformat()
+    now = datetime.utcnow()
     for supply in supplies:
-        if supply.status == "created" and supply.valid_to < now_str:
+        if supply.status == "created" and supply.valid_to < now:
             supply.status = "timeout"
             
     return supplies
@@ -481,7 +481,7 @@ async def accept_task(
 
     # 双重校验（Double Check）：
     # 即使列表接口过滤了过期数据，用户可能在页面停留过久导致数据过期，或通过 API 直接调用，因此必须在写入前再次检查
-    if task.valid_to < datetime.utcnow().isoformat():
+    if task.valid_to < datetime.utcnow():
         raise HTTPException(status_code=400, detail="Task has expired")
 
     # 创建订单
@@ -522,7 +522,7 @@ async def book_supply(
 
     # 双重校验（Double Check）：
     # 防止并发情况下的过期接单（如用户在 09:59 加载页面，在 10:01 点击下单，而过期时间是 10:00）
-    if supply.valid_to < datetime.utcnow().isoformat():
+    if supply.valid_to < datetime.utcnow():
         raise HTTPException(status_code=400, detail="Supply has expired")
 
     # 创建订单
@@ -569,15 +569,15 @@ async def get_orders(
     
     results = session.exec(statement).all()
     
-    now_str = datetime.utcnow().isoformat()
+    now = datetime.utcnow()
     orders_data = []
     for order, consumer, provider, task, supply in results:
         # 惰性计算 (Lazy Evaluation):
         # 如果订单处于 created 状态，但关联的任务或供给已过期，则显示为 timeout
         if order.status == "created":
-            if task and task.valid_to < now_str:
+            if task and task.valid_to < now:
                 order.status = "timeout"
-            elif supply and supply.valid_to < now_str:
+            elif supply and supply.valid_to < now:
                 order.status = "timeout"
 
         start_time = None
