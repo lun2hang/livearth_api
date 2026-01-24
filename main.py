@@ -565,7 +565,7 @@ async def get_orders(
     ).where(
         (Order.consumer_id == current_user.id) | 
         (Order.provider_id == current_user.id)
-    ).order_by(Order.created_at.desc())
+    )
     
     results = session.exec(statement).all()
     
@@ -597,6 +597,17 @@ async def get_orders(
             created_at=order.created_at,
             start_time=start_time
         ))
+
+    # 排序逻辑：
+    # 1. 优先显示 status="created" 的订单
+    # 2. 对于 "created" 订单，按 start_time 升序排列 (即将开始的在前)
+    # 3. 对于其他状态，按 created_at 降序排列 (最近创建的在前)
+    orders_data.sort(key=lambda x: (
+        0 if x.status == "created" else 1,
+        x.start_time if x.status == "created" and x.start_time else datetime.max,
+        -x.created_at.timestamp()
+    ))
+    
     return orders_data
 
 if __name__ == "__main__":
