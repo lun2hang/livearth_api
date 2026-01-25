@@ -114,6 +114,10 @@ class SocialLoginRequest(SQLModel):
     provider: str
     token: str
 
+class CancelRequest(SQLModel):
+    id: int
+    type: str = Field(..., description="类型: task, supply, order")
+
 # --- API 路由 ---
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
@@ -215,6 +219,95 @@ async def create_entry(
             return {"status": "success", "supply_id": supply_item.id}
         except ValidationError as e:
             raise HTTPException(status_code=400, detail=f"数据格式错误 (期望 Supply): {e}")
+
+@app.post("/cancel")
+async def cancel_entry(
+    req: CancelRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    取消发布的任务、供给或订单
+    """
+    if req.type not in ["task", "supply", "order"]:
+        raise HTTPException(status_code=400, detail="Invalid type. Must be 'task', 'supply' or 'order'")
+
+    if req.type == "order":
+        order = session.get(Order, req.id)
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        
+        if current_user.id not in [order.consumer_id, order.provider_id]:
+            raise HTTPException(status_code=403, detail="Permission denied")
+
+        if order.status != "created":
+             raise HTTPException(status_code=400, detail="Only created orders can be canceled")
+
+        item = None
+        is_publisher = False
+        
+        if order.task_id:
+            item = session.get(Task, order.task_id)
+            if item and item.user_id == current_user.id:
+                is_publisher = True
+        elif order.supply_id:
+            item = session.get(Supply, order.supply_id)
+            if item and item.user_id == current_user.id:
+                is_publisher = True
+        
+        # 1. 发布者取消 -> 逻辑同取消 Task/Supply (双向取消)
+        if is_publisher:
+            order.status = "canceled"
+            session.add(order)
+            if item:
+                item.status = "canceled"
+                session.add(item)
+        # 2. 接单者/下单者取消 -> 订单取消，Task/Supply 回归池子
+        else:
+            order.status = "canceled"
+            session.add(order)
+            if item:
+                item.status = "created"
+                session.add(item)
+        
+        session.commit()
+        return {"status": "success", "message": "Order canceled"}
+
+    item = None
+    if req.type == "task":
+        item = session.get(Task, req.id)
+    else:
+        item = session.get(Supply, req.id)
+
+    if not item:
+        raise HTTPException(status_code=404, detail=f"{req.type} not found")
+
+    # 1. 校验是否是用户发布的
+    if item.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    # 2. 校验状态
+    if item.status not in ["created", "matched"]:
+        raise HTTPException(status_code=400, detail="Only created or matched items can be canceled")
+
+    # 3. 修改状态
+    previous_status = item.status
+    item.status = "canceled"
+    session.add(item)
+
+    if previous_status == "matched":
+        # 找到关联的订单也取消
+        if req.type == "task":
+            order = session.exec(select(Order).where(Order.task_id == item.id).where(Order.status != "canceled")).first()
+        else:
+            order = session.exec(select(Order).where(Order.supply_id == item.id).where(Order.status != "canceled")).first()
+        
+        if order:
+            order.status = "canceled"
+            session.add(order)
+
+    session.commit()
+    return {"status": "success", "message": f"{req.type} canceled"}
 
 @app.get("/search")
 async def search(
