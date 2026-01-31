@@ -71,6 +71,7 @@ class User(SQLModel, table=True):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True, description="用户唯一ID")
     username: str = Field(index=True, unique=True, description="用户名")
     email: str = Field(index=True, unique=True, description="邮箱")
+    nickname: Optional[str] = Field(default=None, description="用户昵称")
     hashed_password: Optional[str] = Field(None, description="加密后的密码")
     avatar: Optional[str] = Field(None, description="头像URL")
     status: str = Field(default="active", description="账号状态: active, suspended")
@@ -119,6 +120,7 @@ class OrderLog(SQLModel, table=True):
 class UserInfo(SQLModel):
     id: str
     username: str
+    nickname: Optional[str] = None
     avatar: Optional[str] = None
 
 class OrderWithDetails(SQLModel):
@@ -536,7 +538,7 @@ async def social_login(
             # 生成一个随机或基于邮箱的用户名
             base_username = email.split("@")[0]
             new_username = f"{base_username}_{str(uuid.uuid4())[:4]}"
-            user = User(username=new_username, email=email, hashed_password=None, avatar=picture)
+            user = User(username=new_username, email=email, hashed_password=None, avatar=picture, nickname=name)
             session.add(user)
             session.commit()
             session.refresh(user)
@@ -548,7 +550,7 @@ async def social_login(
 
     # 3. 发放系统 JWT
     access_token = auth_utils.create_access_token(data={"sub": user.id})
-    return {"access_token": access_token, "token_type": "bearer", "user_id": user.id, "username": user.username, "email": user.email, "avatar": user.avatar}
+    return {"access_token": access_token, "token_type": "bearer", "user_id": user.id, "username": user.username, "nickname": user.nickname, "email": user.email, "avatar": user.avatar}
 
 @app.post("/token")
 async def login_for_access_token(
@@ -578,6 +580,7 @@ async def login_for_access_token(
         "token_type": "bearer",
         "user_id": user.id,
         "username": user.username,
+        "nickname": user.nickname,
         "email": user.email,
         "avatar": user.avatar
     }
@@ -597,7 +600,8 @@ async def register(
     db_user = User(
         username=user_in.username,
         email=user_in.email,
-        hashed_password=hashed_password
+        hashed_password=hashed_password,
+        nickname=user_in.username
     )
     session.add(db_user)
     session.commit()
@@ -740,8 +744,8 @@ async def get_orders(
 
         orders_data.append(OrderWithDetails(
             id=order.id,
-            consumer=UserInfo(id=consumer.id, username=consumer.username, avatar=consumer.avatar),
-            provider=UserInfo(id=provider.id, username=provider.username, avatar=provider.avatar),
+            consumer=UserInfo(id=consumer.id, username=consumer.username, nickname=consumer.nickname, avatar=consumer.avatar),
+            provider=UserInfo(id=provider.id, username=provider.username, nickname=provider.nickname, avatar=provider.avatar),
             task_id=order.task_id,
             supply_id=order.supply_id,
             amount=order.amount,
