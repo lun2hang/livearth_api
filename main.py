@@ -89,6 +89,33 @@ class Order(SQLModel, table=True):
     status: str = Field(default="created", description="状态: created, live_start, live_end, paied, canceled, timeout")
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
+class TaskLog(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True, sa_type=BigInteger)
+    task_id: int = Field(..., sa_type=BigInteger, index=True)
+    operator_id: str = Field(..., description="操作人ID")
+    action: str = Field(..., description="操作类型: create, cancel, match, etc.")
+    previous_status: Optional[str] = Field(None, description="修改前状态")
+    new_status: str = Field(..., description="修改后状态")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class SupplyLog(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True, sa_type=BigInteger)
+    supply_id: int = Field(..., sa_type=BigInteger, index=True)
+    operator_id: str = Field(..., description="操作人ID")
+    action: str = Field(..., description="操作类型")
+    previous_status: Optional[str] = Field(None)
+    new_status: str = Field(...)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class OrderLog(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True, sa_type=BigInteger)
+    order_id: int = Field(..., sa_type=BigInteger, index=True)
+    operator_id: str = Field(..., description="操作人ID")
+    action: str = Field(..., description="操作类型")
+    previous_status: Optional[str] = Field(None)
+    new_status: str = Field(...)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
 class UserInfo(SQLModel):
     id: str
     username: str
@@ -207,6 +234,8 @@ async def create_entry(
             session.add(task_item)
             session.commit()
             session.refresh(task_item)
+            session.add(TaskLog(task_id=task_item.id, operator_id=current_user.id, action="create", previous_status=None, new_status="created"))
+            session.commit()
             return {"status": "success", "task_id": task_item.id}
         except ValidationError as e:
             raise HTTPException(status_code=400, detail=f"数据格式错误 (期望 Task): {e}")
@@ -216,6 +245,8 @@ async def create_entry(
             session.add(supply_item)
             session.commit()
             session.refresh(supply_item)
+            session.add(SupplyLog(supply_id=supply_item.id, operator_id=current_user.id, action="create", previous_status=None, new_status="created"))
+            session.commit()
             return {"status": "success", "supply_id": supply_item.id}
         except ValidationError as e:
             raise HTTPException(status_code=400, detail=f"数据格式错误 (期望 Supply): {e}")
@@ -255,20 +286,33 @@ async def cancel_entry(
             if item and item.user_id == current_user.id:
                 is_publisher = True
         
+        previous_order_status = order.status
         # 1. 发布者取消 -> 逻辑同取消 Task/Supply (双向取消)
         if is_publisher:
             order.status = "canceled"
             session.add(order)
+            session.add(OrderLog(order_id=order.id, operator_id=current_user.id, action="cancel", previous_status=previous_order_status, new_status="canceled"))
             if item:
+                prev_item_status = item.status
                 item.status = "canceled"
                 session.add(item)
+                if isinstance(item, Task):
+                    session.add(TaskLog(task_id=item.id, operator_id=current_user.id, action="cancel_by_order", previous_status=prev_item_status, new_status="canceled"))
+                elif isinstance(item, Supply):
+                    session.add(SupplyLog(supply_id=item.id, operator_id=current_user.id, action="cancel_by_order", previous_status=prev_item_status, new_status="canceled"))
         # 2. 接单者/下单者取消 -> 订单取消，Task/Supply 回归池子
         else:
             order.status = "canceled"
             session.add(order)
+            session.add(OrderLog(order_id=order.id, operator_id=current_user.id, action="cancel", previous_status=previous_order_status, new_status="canceled"))
             if item:
+                prev_item_status = item.status
                 item.status = "created"
                 session.add(item)
+                if isinstance(item, Task):
+                    session.add(TaskLog(task_id=item.id, operator_id=current_user.id, action="revert_by_order_cancel", previous_status=prev_item_status, new_status="created"))
+                elif isinstance(item, Supply):
+                    session.add(SupplyLog(supply_id=item.id, operator_id=current_user.id, action="revert_by_order_cancel", previous_status=prev_item_status, new_status="created"))
         
         session.commit()
         return {"status": "success", "message": "Order canceled"}
@@ -294,6 +338,11 @@ async def cancel_entry(
     previous_status = item.status
     item.status = "canceled"
     session.add(item)
+    
+    if req.type == "task":
+        session.add(TaskLog(task_id=item.id, operator_id=current_user.id, action="cancel", previous_status=previous_status, new_status="canceled"))
+    else:
+        session.add(SupplyLog(supply_id=item.id, operator_id=current_user.id, action="cancel", previous_status=previous_status, new_status="canceled"))
 
     if previous_status == "matched":
         # 找到关联的订单也取消
@@ -303,8 +352,10 @@ async def cancel_entry(
             order = session.exec(select(Order).where(Order.supply_id == item.id).where(Order.status != "canceled")).first()
         
         if order:
+            prev_ord_status = order.status
             order.status = "canceled"
             session.add(order)
+            session.add(OrderLog(order_id=order.id, operator_id=current_user.id, action="cancel_by_item", previous_status=prev_ord_status, new_status="canceled"))
 
     session.commit()
     return {"status": "success", "message": f"{req.type} canceled"}
@@ -343,14 +394,14 @@ async def get_task_history(
     """
     获取当前用户的发布需求(Task)历史
     """
-    tasks = session.exec(select(Task).where(Task.user_id == current_user.id)).all()
+    tasks = session.exec(select(Task).where(Task.user_id == current_user.id).order_by(Task.created_at.desc())).all()
     
     # 惰性计算 (Lazy Evaluation):
     # 数据库中保留原始状态，但在返回给前端时，根据时间判断是否已超时。
     # 这样既不需要高频写数据库，又能让用户看到正确的状态。
     now = datetime.utcnow()
     for task in tasks:
-        if task.status == "created" and task.valid_to < now:
+        if task.status in ["created", "matched"] and task.valid_to < now:
             task.status = "timeout" # 仅修改内存对象，不写入数据库
             
     return tasks
@@ -364,11 +415,11 @@ async def get_supply_history(
     """
     获取当前用户的发布服务(Supply)历史
     """
-    supplies = session.exec(select(Supply).where(Supply.user_id == current_user.id)).all()
+    supplies = session.exec(select(Supply).where(Supply.user_id == current_user.id).order_by(Supply.created_at.desc())).all()
     
     now = datetime.utcnow()
     for supply in supplies:
-        if supply.status == "created" and supply.valid_to < now:
+        if supply.status in ["created", "matched"] and supply.valid_to < now:
             supply.status = "timeout"
             
     return supplies
@@ -593,6 +644,10 @@ async def accept_task(
     session.add(task)
     session.commit()
     session.refresh(order)
+    
+    session.add(OrderLog(order_id=order.id, operator_id=current_user.id, action="create", previous_status=None, new_status="created"))
+    session.add(TaskLog(task_id=task.id, operator_id=current_user.id, action="match", previous_status="created", new_status="matched"))
+    session.commit()
     return {"status": "success", "order_id": order.id, "message": "Task accepted", "start_time": task.valid_from}
 
 @app.post("/orders/supply/{supply_id}/book")
@@ -634,6 +689,10 @@ async def book_supply(
     session.add(order)
     session.commit()
     session.refresh(order)
+    
+    session.add(OrderLog(order_id=order.id, operator_id=current_user.id, action="create", previous_status=None, new_status="created"))
+    session.add(SupplyLog(supply_id=supply.id, operator_id=current_user.id, action="match", previous_status="created", new_status="matched"))
+    session.commit()
     return {"status": "success", "order_id": order.id, "message": "Supply booked", "start_time": supply.valid_from}
 
 @app.get("/orders", response_model=List[OrderWithDetails])
