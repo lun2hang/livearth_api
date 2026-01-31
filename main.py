@@ -60,6 +60,14 @@ class Supply(SQLModel, table=True):
     valid_from: datetime
     valid_to: datetime
 
+class TaskRead(Task):
+    nickname: Optional[str] = None
+    avatar: Optional[str] = None
+
+class SupplyRead(Supply):
+    nickname: Optional[str] = None
+    avatar: Optional[str] = None
+
 class SocialAccount(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     provider: str = Field(index=True) # "google", "apple"
@@ -187,7 +195,7 @@ def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
 async def root():
     return {"status": "ok", "message": "VisionUber API is running"}
 
-@app.get("/feed", response_model=List[Union[Supply, Task]])
+@app.get("/feed", response_model=List[Union[SupplyRead, TaskRead]])
 async def get_feed(
     is_consumer: bool = Query(True, description="角色标识: True 为消费者(看供给), False 为供给者(看需求)"),
     user_lat: Optional[float] = Query(None, description="用户当前纬度"),
@@ -203,10 +211,23 @@ async def get_feed(
 
     if is_consumer:
         # 消费者看“谁能帮我看”
-        items = session.exec(select(Supply).where(Supply.status == "created").where(Supply.valid_to > now)).all()
+        results = session.exec(select(Supply, User.nickname, User.avatar).join(User, Supply.user_id == User.id).where(Supply.status == "created").where(Supply.valid_to > now)).all()
+        items = []
+        for supply, nickname, avatar in results:
+            item = SupplyRead.model_validate(supply)
+            item.nickname = nickname
+            item.avatar = avatar
+            items.append(item)
     else:
         # 供给者看“谁想看什么”
-        items = session.exec(select(Task).where(Task.status == "created").where(Task.valid_to > now)).all()
+        results = session.exec(select(Task, User.nickname, User.avatar).join(User, Task.user_id == User.id).where(Task.status == "created").where(Task.valid_to > now)).all()
+        items = []
+        for task, nickname, avatar in results:
+            item = TaskRead.model_validate(task)
+            item.nickname = nickname
+            item.avatar = avatar
+            items.append(item)
+            
         if user_lat is not None and user_lng is not None:
             items = sorted(items, key=lambda x: haversine_distance(user_lat, user_lng, x.lat, x.lng))
         
@@ -378,10 +399,22 @@ async def search(
     now = datetime.utcnow()
 
     if is_consumer:
-        results = session.exec(select(Supply).where(Supply.title.contains(q)).where(Supply.status == "created").where(Supply.valid_to > now).order_by(Supply.rating.desc())).all()
+        db_results = session.exec(select(Supply, User.nickname, User.avatar).join(User, Supply.user_id == User.id).where(Supply.title.contains(q)).where(Supply.status == "created").where(Supply.valid_to > now).order_by(Supply.rating.desc())).all()
+        results = []
+        for supply, nickname, avatar in db_results:
+            item = SupplyRead.model_validate(supply)
+            item.nickname = nickname
+            item.avatar = avatar
+            results.append(item)
         target = "supply"
     else:
-        results = session.exec(select(Task).where(Task.title.contains(q)).where(Task.status == "created").where(Task.valid_to > now)).all()
+        db_results = session.exec(select(Task, User.nickname, User.avatar).join(User, Task.user_id == User.id).where(Task.title.contains(q)).where(Task.status == "created").where(Task.valid_to > now)).all()
+        results = []
+        for task, nickname, avatar in db_results:
+            item = TaskRead.model_validate(task)
+            item.nickname = nickname
+            item.avatar = avatar
+            results.append(item)
         target = "task"
         if user_lat is not None and user_lng is not None:
             results = sorted(results, key=lambda x: haversine_distance(user_lat, user_lng, x.lat, x.lng))
