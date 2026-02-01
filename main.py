@@ -823,15 +823,19 @@ async def get_agora_token(
          raise HTTPException(status_code=400, detail="Call not allowed in current order status")
 
     # 3. 生成 Token
+    # 修复: 移除 UUID 中的减号，生成纯字母数字的 String UID，避免客户端 SDK 兼容性问题
+    agora_uid = current_user.id.replace("-", "")
     channel_name = f"order_{order.id}"
-    token = auth_utils.create_agora_token(channel_name, current_user.id)
-    print(f"[Agora Debug] User={current_user.id} joining Channel={channel_name}")
+    token = auth_utils.create_agora_token(channel_name, agora_uid)
+    rtm_token = auth_utils.create_agora_rtm_token(agora_uid)
+    print(f"[Agora Debug] User={agora_uid} joining Channel={channel_name}")
     
     return {
         "app_id": auth_utils.AGORA_APP_ID,
         "token": token,
+        "rtm_token": rtm_token,
         "channel_name": channel_name,
-        "uid": current_user.id # Agora String UID
+        "uid": agora_uid # 返回处理后的 UID (无减号)
     }
 
 if __name__ == "__main__":

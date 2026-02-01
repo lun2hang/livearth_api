@@ -6,9 +6,10 @@ from jose import jwt
 
 # 尝试导入 Agora SDK，请确保已安装: pip install agora-token-builder
 try:
-    from agora_token_builder import RtcTokenBuilder
+    from agora_token_builder import RtcTokenBuilder, RtmTokenBuilder
 except ImportError:
     RtcTokenBuilder = None
+    RtmTokenBuilder = None
 
 # 密钥配置 (生产环境请务必使用环境变量管理)
 SECRET_KEY = "YOUR_SUPER_SECRET_KEY_CHANGE_THIS"
@@ -43,7 +44,7 @@ def create_agora_token(channel_name: str, user_account: str) -> str:
     if not RtcTokenBuilder:
         raise ImportError("agora-token-builder not installed. Run `pip install agora-token-builder`")
 
-    # Token 有效期 (例如 24 小时)
+    # Token 有效期 (例如 1 小时)
     expiration_time_in_seconds = 3600
     current_timestamp = int(time.time())
     privilege_expired_ts = current_timestamp + expiration_time_in_seconds
@@ -54,5 +55,25 @@ def create_agora_token(channel_name: str, user_account: str) -> str:
 
     token = RtcTokenBuilder.buildTokenWithAccount(
         AGORA_APP_ID, AGORA_APP_CERTIFICATE, channel_name, user_account, role, privilege_expired_ts
+    )
+    return token
+
+def create_agora_rtm_token(user_account: str) -> str:
+    """
+    生成 Agora RTM Token (用于信令/文字聊天)
+    """
+    if not RtmTokenBuilder:
+        raise ImportError("agora-token-builder not installed. Run `pip install agora-token-builder`")
+
+    # RTM Token 有效期 (例如 1 小时)
+    expiration_time_in_seconds = 3600
+    current_timestamp = int(time.time())
+    privilege_expired_ts = current_timestamp + expiration_time_in_seconds
+    
+    # Role_Rtm_User = 1
+    role = 1
+
+    token = RtmTokenBuilder.buildToken(
+        AGORA_APP_ID, AGORA_APP_CERTIFICATE, user_account, role, privilege_expired_ts
     )
     return token
