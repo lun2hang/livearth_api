@@ -47,3 +47,9 @@ CREATE TABLE tasks (
 DATABASE_URL = "postgresql://admin:admin@localhost:5432/vision_uber"
 
 FB GG 的开发者帐号都是hotmail，APP用的163.com的美区账户
+
+Agora 3个尾部干扰
+APPID 0506c3636bcb401bbc282c9901611da210a 
+Cer fda15748889249a3afb0d74807cc4d7765a
+
+

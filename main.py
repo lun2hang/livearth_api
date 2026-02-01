@@ -799,5 +799,40 @@ async def get_orders(
     
     return orders_data
 
+# --- Agora 通话路由 ---
+
+@app.get("/agora/token")
+async def get_agora_token(
+    order_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    获取 Agora 通话 Token
+    """
+    order = session.get(Order, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    
+    # 1. 权限校验: 只有订单的双方可以获取 Token
+    if current_user.id not in [order.consumer_id, order.provider_id]:
+        raise HTTPException(status_code=403, detail="Permission denied: Not a participant of this order")
+        
+    # 2. 状态校验: 只有进行中的订单允许通话
+    if order.status not in ["created", "matched", "live_start"]:
+         raise HTTPException(status_code=400, detail="Call not allowed in current order status")
+
+    # 3. 生成 Token
+    channel_name = f"order_{order.id}"
+    token = auth_utils.create_agora_token(channel_name, current_user.id)
+    print(f"[Agora Debug] User={current_user.id} joining Channel={channel_name}")
+    
+    return {
+        "app_id": auth_utils.AGORA_APP_ID,
+        "token": token,
+        "channel_name": channel_name,
+        "uid": current_user.id # Agora String UID
+    }
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8080)
