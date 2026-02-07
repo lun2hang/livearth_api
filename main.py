@@ -818,15 +818,27 @@ async def get_agora_token(
     if current_user.id not in [order.consumer_id, order.provider_id]:
         raise HTTPException(status_code=403, detail="Permission denied: Not a participant of this order")
         
-    # 2. 状态校验: 只有进行中的订单允许通话
-    if order.status not in ["created", "matched", "live_start"]:
-         raise HTTPException(status_code=400, detail="Call not allowed in current order status")
+    # 2. 状态校验: 只有进行中的订单允许通话 (RTC)，但 RTM (消息) 允许全程使用
+    # if order.status not in ["created", "matched", "live_start"]:
+    #      raise HTTPException(status_code=400, detail="Call not allowed in current order status")
+    allow_rtc = order.status in ["created", "matched", "live_start"]
 
     # 3. 生成 Token
     # 修复: 移除 UUID 中的减号，生成纯字母数字的 String UID，避免客户端 SDK 兼容性问题
     agora_uid = current_user.id.replace("-", "")
     channel_name = f"order_{order.id}"
-    token = auth_utils.create_agora_token(channel_name, agora_uid)
+    
+    # 计算对方的 UID (Peer UID)
+    if current_user.id == order.consumer_id:
+        peer_user_id = order.provider_id
+    else:
+        peer_user_id = order.consumer_id
+    peer_uid = peer_user_id.replace("-", "")
+
+    # 仅在允许通话的状态下生成 RTC Token，否则返回 None
+    token = None
+    if allow_rtc:
+        token = auth_utils.create_agora_token(channel_name, agora_uid)
     rtm_token = auth_utils.create_agora_rtm_token(agora_uid)
     print(f"[Agora Debug] User={agora_uid} joining Channel={channel_name}")
     
@@ -835,7 +847,8 @@ async def get_agora_token(
         "token": token,
         "rtm_token": rtm_token,
         "channel_name": channel_name,
-        "uid": agora_uid # 返回处理后的 UID (无减号)
+        "uid": agora_uid, # 返回处理后的 UID (无减号)
+        "peer_uid": peer_uid # 返回对方的 UID，用于 P2P 消息
     }
 
 if __name__ == "__main__":
