@@ -801,14 +801,31 @@ async def get_orders(
 
 # --- Agora 通话路由 ---
 
-@app.get("/agora/token")
-async def get_agora_token(
+@app.get("/agora/rtm-token")
+async def get_rtm_token(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    获取 Agora RTM Token (用于 App 启动时登录信令系统)
+    """
+    # 修复: 移除 UUID 中的减号，生成纯字母数字的 String UID
+    agora_uid = current_user.id.replace("-", "")
+    rtm_token = auth_utils.create_agora_rtm_token(agora_uid)
+    
+    return {
+        "app_id": auth_utils.AGORA_APP_ID,
+        "rtm_token": rtm_token,
+        "uid": agora_uid
+    }
+
+@app.get("/agora/rtc-token")
+async def get_rtc_token(
     order_id: int,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
     """
-    获取 Agora 通话 Token
+    获取 Agora RTC Token (用于订单内的音视频通话)
     """
     order = session.get(Order, order_id)
     if not order:
@@ -818,9 +835,7 @@ async def get_agora_token(
     if current_user.id not in [order.consumer_id, order.provider_id]:
         raise HTTPException(status_code=403, detail="Permission denied: Not a participant of this order")
         
-    # 2. 状态校验: 只有进行中的订单允许通话 (RTC)，但 RTM (消息) 允许全程使用
-    # if order.status not in ["created", "matched", "live_start"]:
-    #      raise HTTPException(status_code=400, detail="Call not allowed in current order status")
+    # 2. 状态校验: 只有进行中的订单允许通话
     allow_rtc = order.status in ["created", "matched", "live_start"]
 
     # 3. 生成 Token
@@ -839,13 +854,12 @@ async def get_agora_token(
     token = None
     if allow_rtc:
         token = auth_utils.create_agora_token(channel_name, agora_uid)
-    rtm_token = auth_utils.create_agora_rtm_token(agora_uid)
-    print(f"[Agora Debug] User={agora_uid} joining Channel={channel_name}")
+    
+    print(f"[Agora Debug] User={agora_uid} requesting RTC Token for Channel={channel_name}")
     
     return {
         "app_id": auth_utils.AGORA_APP_ID,
         "token": token,
-        "rtm_token": rtm_token,
         "channel_name": channel_name,
         "uid": agora_uid, # 返回处理后的 UID (无减号)
         "peer_uid": peer_uid # 返回对方的 UID，用于 P2P 消息
