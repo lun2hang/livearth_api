@@ -3,7 +3,7 @@ from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from typing import List, Optional, Union
 from pydantic import ValidationError
 from sqlmodel import Field, Session, SQLModel, create_engine, select, Relationship
-from sqlalchemy import BigInteger
+from sqlalchemy import BigInteger, func, Index
 from sqlalchemy.orm import aliased
 import uvicorn
 import uuid
@@ -124,6 +124,40 @@ class OrderLog(SQLModel, table=True):
     previous_status: Optional[str] = Field(None)
     new_status: str = Field(...)
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class ChatMessage(SQLModel, table=True):
+    # 添加复合索引以加速未读数计算
+    # 场景: WHERE receiver_id = ? GROUP BY order_id HAVING id > ?
+    # 索引覆盖: 直接在索引中完成计数，无需回表查询
+    __table_args__ = (
+        Index("idx_receiver_unread", "receiver_id", "order_id", "id"),
+    )
+    
+    id: Optional[int] = Field(default=None, primary_key=True, sa_type=BigInteger)
+    order_id: int = Field(..., index=True, sa_type=BigInteger, description="关联订单ID")
+    sender_id: str = Field(..., index=True, description="发送者ID")
+    receiver_id: str = Field(..., index=True, description="接收者ID")
+    content: str = Field(..., description="消息内容")
+    msg_type: str = Field(default="text", description="消息类型: text, image, etc.")
+    client_timestamp: Optional[int] = Field(None, sa_type=BigInteger, description="客户端发送时间戳(ms)")
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True, description="服务端入库时间")
+
+class ChatMessageCreate(SQLModel):
+    order_id: int
+    content: str
+    type: str = "text"
+    timestamp: Optional[int] = None
+
+class OrderReadStatus(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True, sa_type=BigInteger)
+    order_id: int = Field(..., index=True, sa_type=BigInteger, description="关联订单ID")
+    user_id: str = Field(..., index=True, description="用户ID")
+    last_read_msg_id: int = Field(default=0, sa_type=BigInteger, description="最后读取的消息ID")
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+class ReadAckRequest(SQLModel):
+    order_id: int
+    latest_message_id: int
 
 class UserInfo(SQLModel):
     id: str
@@ -862,6 +896,122 @@ async def get_rtc_token(
         "uid": agora_uid, # 返回处理后的 UID (无减号)
         "peer_uid": peer_uid # 返回对方的 UID，用于 P2P 消息
     }
+
+@app.post("/messages/send")
+async def save_chat_message(
+    msg_in: ChatMessageCreate,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    保存聊天记录 (客户端通过 RTM 发送消息时同步调用此接口)
+    """
+    order = session.get(Order, msg_in.order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    
+    # 根据当前用户和订单关系，自动推断接收者，防止伪造
+    if current_user.id == order.consumer_id:
+        receiver_id = order.provider_id
+    elif current_user.id == order.provider_id:
+        receiver_id = order.consumer_id
+    else:
+        raise HTTPException(status_code=403, detail="Permission denied: Not a participant")
+
+    chat_msg = ChatMessage(
+        order_id=order.id,
+        sender_id=current_user.id,
+        receiver_id=receiver_id,
+        content=msg_in.content,
+        msg_type=msg_in.type,
+        client_timestamp=msg_in.timestamp
+    )
+    session.add(chat_msg)
+    session.commit()
+    session.refresh(chat_msg)
+    return {"status": "success", "msg_id": chat_msg.id}
+
+@app.get("/messages/history", response_model=List[ChatMessage])
+async def get_chat_history(
+    order_id: Optional[int] = None,
+    since_id: Optional[int] = Query(None, description="上次同步的消息ID (用于增量同步)"),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    获取聊天历史记录。
+    - 场景1 (App启动): 不传 order_id，传本地最新一条消息的 since_id，拉取所有新消息。
+    - 场景2 (进入某订单): 传 order_id，拉取该订单的所有历史。
+    """
+    statement = select(ChatMessage).where(
+        (ChatMessage.sender_id == current_user.id) | 
+        (ChatMessage.receiver_id == current_user.id)
+    )
+    
+    if order_id:
+        statement = statement.where(ChatMessage.order_id == order_id)
+    
+    if since_id:
+        statement = statement.where(ChatMessage.id > since_id)
+        
+    # 按 ID 升序排列 (旧 -> 新)，方便客户端追加到 UI 底部
+    statement = statement.order_by(ChatMessage.id.asc())
+    
+    return session.exec(statement).all()
+
+@app.get("/unread-counts")
+async def get_unread_counts(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    获取全局未读消息计数 (App 启动/重连时调用)
+    返回格式: {"order_id_1": 5, "order_id_2": 1}
+    """
+    # 使用聚合查询一次性计算所有订单的未读数，避免 N+1 查询
+    # 逻辑: 统计 receiver_id 是我，且 消息ID > 我的 last_read_msg_id 的消息数量
+    statement = (
+        select(ChatMessage.order_id, func.count(ChatMessage.id))
+        .outerjoin(
+            OrderReadStatus, 
+            (OrderReadStatus.order_id == ChatMessage.order_id) & 
+            (OrderReadStatus.user_id == current_user.id)
+        )
+        .where(ChatMessage.receiver_id == current_user.id)
+        .where(ChatMessage.id > func.coalesce(OrderReadStatus.last_read_msg_id, 0))
+        .group_by(ChatMessage.order_id)
+    )
+    
+    results = session.exec(statement).all()
+    return {order_id: count for order_id, count in results}
+
+@app.post("/read-ack")
+async def ack_read_message(
+    req: ReadAckRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    提交已读回执 (进入聊天页面时调用)
+    """
+    # 查询或创建阅读状态记录
+    read_status = session.exec(select(OrderReadStatus).where(
+        OrderReadStatus.order_id == req.order_id,
+        OrderReadStatus.user_id == current_user.id
+    )).first()
+    
+    if not read_status:
+        read_status = OrderReadStatus(order_id=req.order_id, user_id=current_user.id, last_read_msg_id=req.latest_message_id)
+        session.add(read_status)
+    else:
+        # 仅当新 ID 更大时更新 (防止乱序请求导致回退)
+        if req.latest_message_id > read_status.last_read_msg_id:
+            read_status.last_read_msg_id = req.latest_message_id
+            read_status.updated_at = datetime.utcnow()
+            session.add(read_status)
+            
+    session.commit()
+    return {"status": "success"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8080)
