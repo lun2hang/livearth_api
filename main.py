@@ -808,8 +808,7 @@ async def get_rtm_token(
     """
     获取 Agora RTM Token (用于 App 启动时登录信令系统)
     """
-    # 修复: 移除 UUID 中的减号，生成纯字母数字的 String UID
-    agora_uid = current_user.id.replace("-", "")
+    agora_uid = current_user.id
     rtm_token = auth_utils.create_agora_rtm_token(agora_uid)
     
     return {
@@ -839,8 +838,7 @@ async def get_rtc_token(
     allow_rtc = order.status in ["created", "matched", "live_start"]
 
     # 3. 生成 Token
-    # 修复: 移除 UUID 中的减号，生成纯字母数字的 String UID，避免客户端 SDK 兼容性问题
-    agora_uid = current_user.id.replace("-", "")
+    agora_uid = current_user.id
     channel_name = f"order_{order.id}"
     
     # 计算对方的 UID (Peer UID)
@@ -848,7 +846,7 @@ async def get_rtc_token(
         peer_user_id = order.provider_id
     else:
         peer_user_id = order.consumer_id
-    peer_uid = peer_user_id.replace("-", "")
+    peer_uid = peer_user_id
 
     # 仅在允许通话的状态下生成 RTC Token，否则返回 None
     token = None
