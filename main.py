@@ -462,17 +462,31 @@ async def get_task_history(
 ):
     """
     获取当前用户的发布需求(Task)历史
+    状态逻辑: 优先读取关联 Order 的状态 (如 live_end, paied)，若无 Order 则使用 Task 自身状态
     """
-    tasks = session.exec(select(Task).where(Task.user_id == current_user.id).order_by(Task.created_at.desc())).all()
+    # 关联查询 Task 和 Order 的状态
+    # 过滤掉已取消的订单，只关注有效流转中的订单状态
+    statement = (
+        select(Task, Order.status)
+        .outerjoin(Order, (Order.task_id == Task.id) & (Order.status != "canceled"))
+        .where(Task.user_id == current_user.id)
+        .order_by(Task.created_at.desc())
+    )
+    results = session.exec(statement).all()
     
-    # 惰性计算 (Lazy Evaluation):
-    # 数据库中保留原始状态，但在返回给前端时，根据时间判断是否已超时。
-    # 这样既不需要高频写数据库，又能让用户看到正确的状态。
+    tasks = []
     now = datetime.utcnow()
-    for task in tasks:
+    for task, order_status in results:
+        # 1. 如果存在关联订单，订单状态即为任务的最新状态 (覆盖 matched)
+        if order_status:
+            task.status = order_status
+        
+        # 2. 如果没有订单 (处于 created 状态)，检查是否超时
         if task.status in ["created", "matched"] and task.valid_to < now:
             task.status = "timeout" # 仅修改内存对象，不写入数据库
-            
+        
+        tasks.append(task)
+        
     return tasks
 
 @app.get("/history/supply", response_model=List[Supply])
@@ -483,14 +497,26 @@ async def get_supply_history(
     
     """
     获取当前用户的发布服务(Supply)历史
+    状态逻辑: 优先读取关联 Order 的状态
     """
-    supplies = session.exec(select(Supply).where(Supply.user_id == current_user.id).order_by(Supply.created_at.desc())).all()
+    statement = (
+        select(Supply, Order.status)
+        .outerjoin(Order, (Order.supply_id == Supply.id) & (Order.status != "canceled"))
+        .where(Supply.user_id == current_user.id)
+        .order_by(Supply.created_at.desc())
+    )
+    results = session.exec(statement).all()
     
+    supplies = []
     now = datetime.utcnow()
-    for supply in supplies:
+    for supply, order_status in results:
+        if order_status:
+            supply.status = order_status
+            
         if supply.status in ["created", "matched"] and supply.valid_to < now:
             supply.status = "timeout"
-            
+        supplies.append(supply)
+        
     return supplies
 
 def verify_google_token(token: str) -> dict:
