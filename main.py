@@ -95,7 +95,7 @@ class Order(SQLModel, table=True):
     task_id: Optional[int] = Field(default=None, description="关联的需求ID", sa_type=BigInteger)
     supply_id: Optional[int] = Field(default=None, description="关联的供给ID", sa_type=BigInteger)
     amount: float = Field(..., description="交易金额")
-    status: str = Field(default="created", description="状态: created, live_start, live_end, paied, canceled, timeout")
+    status: str = Field(default="matched", description="状态: matched, live_start, live_end, paied, canceled, timeout")
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 class TaskLog(SQLModel, table=True):
@@ -328,8 +328,8 @@ async def cancel_entry(
         if current_user.id not in [order.consumer_id, order.provider_id]:
             raise HTTPException(status_code=403, detail="Permission denied")
 
-        if order.status != "created":
-             raise HTTPException(status_code=400, detail="Only created orders can be canceled")
+        if order.status != "matched":
+             raise HTTPException(status_code=400, detail="Only matched orders can be canceled")
 
         item = None
         is_publisher = False
@@ -731,7 +731,7 @@ async def accept_task(
         provider_id=current_user.id,
         task_id=task.id,
         amount=task.budget,
-        status="created" # 接单即开始
+        status="matched" # 接单即开始
     )
     
     # 更新任务状态
@@ -742,7 +742,7 @@ async def accept_task(
     session.commit()
     session.refresh(order)
     
-    session.add(OrderLog(order_id=order.id, operator_id=current_user.id, action="create", previous_status=None, new_status="created"))
+    session.add(OrderLog(order_id=order.id, operator_id=current_user.id, action="create", previous_status=None, new_status="matched"))
     session.add(TaskLog(task_id=task.id, operator_id=current_user.id, action="match", previous_status="created", new_status="matched"))
     session.commit()
     return {"status": "success", "order_id": order.id, "message": "Task accepted", "start_time": task.valid_from}
@@ -776,7 +776,7 @@ async def book_supply(
         provider_id=supply.user_id,
         supply_id=supply.id,
         amount=supply.price,
-        status="created" # 待确认或直接开始，这里假设创建即待服务
+        status="matched" # 待确认或直接开始，这里假设创建即待服务
     )
     
     # 更新供给状态
@@ -787,7 +787,7 @@ async def book_supply(
     session.commit()
     session.refresh(order)
     
-    session.add(OrderLog(order_id=order.id, operator_id=current_user.id, action="create", previous_status=None, new_status="created"))
+    session.add(OrderLog(order_id=order.id, operator_id=current_user.id, action="create", previous_status=None, new_status="matched"))
     session.add(SupplyLog(supply_id=supply.id, operator_id=current_user.id, action="match", previous_status="created", new_status="matched"))
     session.commit()
     return {"status": "success", "order_id": order.id, "message": "Supply booked", "start_time": supply.valid_from}
@@ -823,7 +823,7 @@ async def get_orders(
     for order, consumer, provider, task, supply in results:
         # 惰性计算 (Lazy Evaluation):
         # 如果订单处于 created 状态，但关联的任务或供给已过期，则显示为 timeout
-        if order.status == "created":
+        if order.status == "matched":
             if task and task.valid_to < now:
                 order.status = "timeout"
             elif supply and supply.valid_to < now:
@@ -852,8 +852,8 @@ async def get_orders(
     # 2. 对于 "created" 订单，按 start_time 升序排列 (即将开始的在前)
     # 3. 对于其他状态，按 created_at 降序排列 (最近创建的在前)
     orders_data.sort(key=lambda x: (
-        0 if x.status == "created" else 1,
-        x.start_time if x.status == "created" and x.start_time else datetime.max,
+        0 if x.status == "matched" else 1,
+        x.start_time if x.status == "matched" and x.start_time else datetime.max,
         -x.created_at.timestamp()
     ))
     
@@ -895,7 +895,7 @@ async def get_rtc_token(
         raise HTTPException(status_code=403, detail="Permission denied: Not a participant of this order")
         
     # 2. 状态校验: 只有进行中的订单允许通话
-    allow_rtc = order.status in ["created", "matched", "live_start"]
+    allow_rtc = order.status in ["matched", "live_start"]
 
     # 3. 生成 Token
     agora_uid = current_user.id
