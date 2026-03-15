@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query, Depends, HTTPException, status
+from fastapi import FastAPI, Query, Depends, HTTPException, status, UploadFile, File
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from typing import List, Optional, Union
 from pydantic import ValidationError
@@ -8,9 +8,11 @@ from sqlalchemy.orm import aliased
 import uvicorn
 import uuid
 import urllib.request
+import time
 import json
 from datetime import datetime, timedelta
 import auth_utils
+from storage_utils import gcs_service
 from jose import jwt, JWTError
 import math
 
@@ -700,6 +702,31 @@ async def register(
     session.commit()
     session.refresh(db_user)
     return {"status": "success", "user_id": db_user.id, "username": db_user.username}
+
+@app.post("/users/me/avatar")
+async def update_avatar(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    # 1. 验证文件类型
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Only images are allowed")
+
+    # 2. 生成存储路径 (uid/avatar_timestamp.jpg)
+    file_extension = file.filename.split(".")[-1]
+    file_path = f"avatars/{current_user.id}/avatar_{int(time.time())}.{file_extension}"
+
+    # 3. 读取内容并上传到 GCS
+    content = await file.read()
+    avatar_url = await gcs_service.upload_file(content, file_path, file.content_type)
+
+    # 4. 更新数据库中的用户头像字段
+    current_user.avatar = avatar_url
+    session.add(current_user)
+    session.commit()
+
+    return {"status": "success", "avatar_url": avatar_url}
 
 # --- 订单系统路由 ---
 
