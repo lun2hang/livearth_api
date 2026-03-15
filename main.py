@@ -895,7 +895,7 @@ async def get_rtc_token(
         raise HTTPException(status_code=403, detail="Permission denied: Not a participant of this order")
         
     # 2. 状态校验: 只有进行中的订单允许通话
-    allow_rtc = order.status in ["matched", "live_start"]
+    allow_rtc = order.status in ["matched", "live_start", "live_end"]
 
     # 3. 生成 Token
     agora_uid = current_user.id
@@ -922,6 +922,121 @@ async def get_rtc_token(
         "uid": agora_uid, # 返回处理后的 UID (无减号)
         "peer_uid": peer_uid # 返回对方的 UID，用于 P2P 消息
     }
+
+@app.post("/orders/{order_id}/live-join")
+async def join_live_call(
+    order_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    用户进入视频通话。
+    当第二个用户进入时，将订单状态从 matched/live_end 修改为 live_start，并记录日志。
+    """
+    order = session.get(Order, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    
+    if current_user.id not in [order.consumer_id, order.provider_id]:
+        raise HTTPException(status_code=403, detail="Permission denied")
+        
+    # 允许在 live_end 状态下重新加入
+    if order.status not in ["matched", "live_start", "live_end"]:
+        raise HTTPException(status_code=400, detail=f"Cannot join call in current status: {order.status}")
+
+    if order.status == "live_start":
+        return {"status": "success", "order_status": order.status}
+
+    # 1. 记录该用户的加入动作并首先提交，防止双方并发进入时产生 Race Condition
+    session.add(OrderLog(
+        order_id=order.id, 
+        operator_id=current_user.id, 
+        action="join_call", 
+        previous_status=order.status, 
+        new_status=order.status
+    ))
+    session.commit()
+    
+    # 刷新订单对象以获取最新的数据库状态
+    session.refresh(order)
+
+    # 2. 判断对方是否“在房间里” (通过最新的 join/leave 日志判断)
+    other_user_id = order.provider_id if current_user.id == order.consumer_id else order.consumer_id
+    
+    latest_log_for_other = session.exec(
+        select(OrderLog)
+        .where(
+            OrderLog.order_id == order.id,
+            OrderLog.operator_id == other_user_id,
+            OrderLog.action.in_(["join_call", "leave_call"])
+        )
+        .order_by(OrderLog.id.desc())
+    ).first()
+
+    other_is_in = latest_log_for_other and latest_log_for_other.action == "join_call"
+
+
+    # 3. 如果对方在，且当前状态是 matched 或 live_end，则将订单状态升级为 live_start
+    if other_is_in and order.status in ["matched", "live_end"]:
+        prev_status = order.status
+        order.status = "live_start"
+        session.add(order)
+        
+        # 记录状态变更日志
+        session.add(OrderLog(
+            order_id=order.id, 
+            operator_id=current_user.id, 
+            action="live_start", 
+            previous_status=prev_status, 
+            new_status="live_start"
+        ))
+        session.commit()
+
+    return {"status": "success", "order_status": order.status}
+
+@app.post("/orders/{order_id}/live-leave")
+async def leave_live_call(
+    order_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    用户退出视频通话。
+    当任一用户退出时，将订单状态修改为 live_end，并记录日志。
+    """
+    order = session.get(Order, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    
+    if current_user.id not in [order.consumer_id, order.provider_id]:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    # 记录该用户的退出动作
+    session.add(OrderLog(
+        order_id=order.id, 
+        operator_id=current_user.id, 
+        action="leave_call", 
+        previous_status=order.status, 
+        new_status=order.status
+    ))
+
+    # 只有在 live_start 状态下，有一方退出时，才正式结束通话
+    if order.status == "live_start":
+        prev_status = order.status
+        order.status = "live_end"
+        session.add(order)
+        
+        # 记录状态变更日志
+        session.add(OrderLog(
+            order_id=order.id, 
+            operator_id=current_user.id, 
+            action="live_end", 
+            previous_status=prev_status, 
+            new_status="live_end"
+        ))
+
+    session.commit()
+    return {"status": "success", "order_status": order.status}
 
 @app.post("/messages/send")
 async def save_chat_message(
