@@ -1,5 +1,5 @@
-from fastapi import FastAPI, Query, Depends, HTTPException, status, UploadFile, File
-from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
+from fastapi import FastAPI, Query, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer 
 from typing import List, Optional, Union
 from pydantic import ValidationError
 from sqlmodel import Field, Session, SQLModel, create_engine, select, Relationship
@@ -40,6 +40,7 @@ class Task(SQLModel, table=True):
     user_id: str = Field(..., description="发布者ID")
     title: str = Field(..., description="任务标题")
     description: str = Field(None, description="详细描述")
+    cover_image_url: Optional[str] = Field(None, description="封面图片URL")
     lat: float = Field(..., description="纬度")
     lng: float = Field(..., description="经度")
     budget: float = Field(..., description="预算")
@@ -53,6 +54,7 @@ class Supply(SQLModel, table=True):
     user_id: str
     title: str
     description: str
+    cover_image_url: Optional[str] = Field(None, description="封面图片URL")
     lat: float
     lng: float
     rating: float
@@ -271,16 +273,34 @@ async def get_feed(
 
 @app.post("/create")
 async def create_entry(
-    item: dict,
+    item_data: str = Form(..., description="The Task/Supply data as a JSON string"),
+    cover_file: Optional[UploadFile] = File(None, description="Optional cover image for the task/supply"),
     is_consumer: bool = Query(True, description="角色标识: True 为消费者(发布需求), False 为供给者(发布服务)"),
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
     """
-    创建发布:
-    - 消费者 (is_consumer=True): 发布需求
-    - 供给者 (is_consumer=False): 发布服务
+    创建发布: - 消费者 (is_consumer=True): 发布需求 - 供给者 (is_consumer=False): 发布服务
     """
+    try:
+        item = json.loads(item_data)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON format for item_data.")
+
+    # Handle file upload
+    if cover_file:
+        if not cover_file.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="Only images are allowed for cover.")
+        
+        file_extension = cover_file.filename.split(".")[-1] if "." in cover_file.filename else "jpg"
+        entity_type = "tasks" if is_consumer else "supplies"
+        file_path = f"{entity_type}/{current_user.id}/cover_{int(time.time())}.{file_extension}"
+
+        content = await cover_file.read()
+        cover_image_url = await gcs_service.upload_file(content, file_path, cover_file.content_type)
+        
+        item["cover_image_url"] = cover_image_url
+
     # 强制使用当前登录用户的 ID，防止伪造
     item["user_id"] = current_user.id
 
@@ -289,18 +309,18 @@ async def create_entry(
 
     if is_consumer:
         try:
-            task_item = Task.model_validate(item)
+            task_item = Task.model_validate(item) 
             session.add(task_item)
             session.commit()
             session.refresh(task_item)
             session.add(TaskLog(task_id=task_item.id, operator_id=current_user.id, action="create", previous_status=None, new_status="created"))
             session.commit()
             return {"status": "success", "task_id": task_item.id}
-        except ValidationError as e:
+        except ValidationError as e: 
             raise HTTPException(status_code=400, detail=f"数据格式错误 (期望 Task): {e}")
     else:
         try:
-            supply_item = Supply.model_validate(item)
+            supply_item = Supply.model_validate(item) 
             session.add(supply_item)
             session.commit()
             session.refresh(supply_item)
@@ -308,7 +328,7 @@ async def create_entry(
             session.commit()
             return {"status": "success", "supply_id": supply_item.id}
         except ValidationError as e:
-            raise HTTPException(status_code=400, detail=f"数据格式错误 (期望 Supply): {e}")
+            raise HTTPException(status_code=400, detail=f"数据格式错误 (期望 Supply): {e}") 
 
 @app.post("/cancel")
 async def cancel_entry(
