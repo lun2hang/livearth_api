@@ -439,6 +439,42 @@ async def cancel_entry(
     session.commit()
     return {"status": "success", "message": f"{req.type} canceled"}
 
+@app.get("/task/{task_id}", response_model=TaskRead)
+async def get_task_detail(
+    task_id: int,
+    session: Session = Depends(get_session)
+):
+    """
+    获取单个任务详情
+    """
+    result = session.exec(select(Task, User.nickname, User.avatar).join(User, Task.user_id == User.id).where(Task.id == task_id)).first()
+    if not result:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    task, nickname, avatar = result
+    item = TaskRead.model_validate(task)
+    item.nickname = nickname
+    item.avatar = avatar
+    return item
+
+@app.get("/supply/{supply_id}", response_model=SupplyRead)
+async def get_supply_detail(
+    supply_id: int,
+    session: Session = Depends(get_session)
+):
+    """
+    获取单个供给详情
+    """
+    result = session.exec(select(Supply, User.nickname, User.avatar).join(User, Supply.user_id == User.id).where(Supply.id == supply_id)).first()
+    if not result:
+        raise HTTPException(status_code=404, detail="Supply not found")
+    
+    supply, nickname, avatar = result
+    item = SupplyRead.model_validate(supply)
+    item.nickname = nickname
+    item.avatar = avatar
+    return item
+
 @app.get("/search")
 async def search(
     q: str,
