@@ -942,6 +942,60 @@ async def get_orders(
     
     return orders_data
 
+@app.get("/orders/{order_id}", response_model=OrderWithDetails)
+async def get_order_detail(
+    order_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    获取单个订单的详细信息
+    """
+    Consumer = aliased(User)
+    Provider = aliased(User)
+
+    statement = select(Order, Consumer, Provider, Task, Supply).join(
+        Consumer, Order.consumer_id == Consumer.id
+    ).join(
+        Provider, Order.provider_id == Provider.id
+    ).outerjoin(
+        Task, Order.task_id == Task.id
+    ).outerjoin(
+        Supply, Order.supply_id == Supply.id
+    ).where(Order.id == order_id)
+    
+    result = session.exec(statement).first()
+    
+    if not result:
+        raise HTTPException(status_code=404, detail="Order not found")
+        
+    order, consumer, provider, task, supply = result
+    
+    # 权限校验：只能查看与自己相关的订单
+    if current_user.id not in [order.consumer_id, order.provider_id]:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    now = datetime.utcnow()
+    if order.status == "matched":
+        if task and task.valid_to < now:
+            order.status = "timeout"
+        elif supply and supply.valid_to < now:
+            order.status = "timeout"
+
+    start_time = task.valid_from if task else (supply.valid_from if supply else None)
+
+    return OrderWithDetails(
+        id=order.id,
+        consumer=UserInfo(id=consumer.id, username=consumer.username, nickname=consumer.nickname, avatar=consumer.avatar),
+        provider=UserInfo(id=provider.id, username=provider.username, nickname=provider.nickname, avatar=provider.avatar),
+        task_id=order.task_id,
+        supply_id=order.supply_id,
+        amount=order.amount,
+        status=order.status,
+        created_at=order.created_at,
+        start_time=start_time
+    )
+
 # --- Agora 通话路由 ---
 
 @app.get("/agora/rtm-token")
