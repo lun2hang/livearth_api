@@ -205,6 +205,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), session: Session
     )
     try:
         payload = jwt.decode(token, auth_utils.SECRET_KEY, algorithms=[auth_utils.ALGORITHM])
+        # pyrefly: ignore [bad-assignment]
         user_id: str = payload.get("sub")
         if user_id is None:
             raise credentials_exception
@@ -249,6 +250,7 @@ async def get_feed(
 
     if is_consumer:
         # 消费者看“谁能帮我看”
+        # pyrefly: ignore [bad-argument-type]
         results = session.exec(select(Supply, User.nickname, User.avatar).join(User, Supply.user_id == User.id).where(Supply.status == "created").where(Supply.valid_to > now)).all()
         items = []
         for supply, nickname, avatar in results:
@@ -258,6 +260,7 @@ async def get_feed(
             items.append(item)
     else:
         # 供给者看“谁想看什么”
+        # pyrefly: ignore [bad-argument-type]
         results = session.exec(select(Task, User.nickname, User.avatar).join(User, Task.user_id == User.id).where(Task.status == "created").where(Task.valid_to > now)).all()
         items = []
         for task, nickname, avatar in results:
@@ -289,14 +292,17 @@ async def create_entry(
 
     # Handle file upload
     if cover_file:
+        # pyrefly: ignore [missing-attribute]
         if not cover_file.content_type.startswith("image/"):
             raise HTTPException(status_code=400, detail="Only images are allowed for cover.")
         
+        # pyrefly: ignore [missing-attribute, not-iterable]
         file_extension = cover_file.filename.split(".")[-1] if "." in cover_file.filename else "jpg"
         entity_type = "tasks" if is_consumer else "supplies"
         file_path = f"{entity_type}/{current_user.id}/cover_{int(time.time())}.{file_extension}"
 
         content = await cover_file.read()
+        # pyrefly: ignore [bad-argument-type]
         cover_image_url = await gcs_service.upload_file(content, file_path, cover_file.content_type)
         
         item["cover_image_url"] = cover_image_url
@@ -447,6 +453,7 @@ async def get_task_detail(
     """
     获取单个任务详情
     """
+    # pyrefly: ignore [bad-argument-type]
     result = session.exec(select(Task, User.nickname, User.avatar).join(User, Task.user_id == User.id).where(Task.id == task_id)).first()
     if not result:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -465,6 +472,7 @@ async def get_supply_detail(
     """
     获取单个供给详情
     """
+    # pyrefly: ignore [bad-argument-type]
     result = session.exec(select(Supply, User.nickname, User.avatar).join(User, Supply.user_id == User.id).where(Supply.id == supply_id)).first()
     if not result:
         raise HTTPException(status_code=404, detail="Supply not found")
@@ -491,6 +499,7 @@ async def search(
     now = datetime.utcnow()
 
     if is_consumer:
+        # pyrefly: ignore [bad-argument-type, missing-attribute]
         db_results = session.exec(select(Supply, User.nickname, User.avatar).join(User, Supply.user_id == User.id).where(Supply.title.contains(q)).where(Supply.status == "created").where(Supply.valid_to > now).order_by(Supply.rating.desc())).all()
         results = []
         for supply, nickname, avatar in db_results:
@@ -500,6 +509,7 @@ async def search(
             results.append(item)
         target = "supply"
     else:
+        # pyrefly: ignore [bad-argument-type, missing-attribute]
         db_results = session.exec(select(Task, User.nickname, User.avatar).join(User, Task.user_id == User.id).where(Task.title.contains(q)).where(Task.status == "created").where(Task.valid_to > now)).all()
         results = []
         for task, nickname, avatar in db_results:
@@ -526,8 +536,10 @@ async def get_task_history(
     # 过滤掉已取消的订单，只关注有效流转中的订单状态
     statement = (
         select(Task, Order.status)
+        # pyrefly: ignore [bad-argument-type]
         .outerjoin(Order, (Order.task_id == Task.id) & (Order.status != "canceled"))
         .where(Task.user_id == current_user.id)
+        # pyrefly: ignore [missing-attribute]
         .order_by(Task.created_at.desc())
     )
     results = session.exec(statement).all()
@@ -559,8 +571,10 @@ async def get_supply_history(
     """
     statement = (
         select(Supply, Order.status)
+        # pyrefly: ignore [bad-argument-type]
         .outerjoin(Order, (Order.supply_id == Supply.id) & (Order.status != "canceled"))
         .where(Supply.user_id == current_user.id)
+        # pyrefly: ignore [missing-attribute]
         .order_by(Supply.created_at.desc())
     )
     results = session.exec(statement).all()
@@ -700,7 +714,9 @@ async def social_login(
         session.commit()
 
     # 3. 发放系统 JWT
+    # pyrefly: ignore [missing-attribute]
     access_token = auth_utils.create_access_token(data={"sub": user.id})
+    # pyrefly: ignore [missing-attribute]
     return {"access_token": access_token, "token_type": "bearer", "user_id": user.id, "username": user.username, "nickname": user.nickname, "email": user.email, "avatar": user.avatar}
 
 @app.post("/token")
@@ -766,15 +782,18 @@ async def update_avatar(
     session: Session = Depends(get_session)
 ):
     # 1. 验证文件类型
+    # pyrefly: ignore [missing-attribute]
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Only images are allowed")
 
     # 2. 生成存储路径 (uid/avatar_timestamp.jpg)
+    # pyrefly: ignore [missing-attribute]
     file_extension = file.filename.split(".")[-1]
     file_path = f"avatars/{current_user.id}/avatar_{int(time.time())}.{file_extension}"
 
     # 3. 读取内容并上传到 GCS
     content = await file.read()
+    # pyrefly: ignore [bad-argument-type]
     avatar_url = await gcs_service.upload_file(content, file_path, file.content_type)
 
     # 4. 更新数据库中的用户头像字段
@@ -886,6 +905,7 @@ async def get_orders(
     Consumer = aliased(User)
     Provider = aliased(User)
 
+    # pyrefly: ignore [no-matching-overload]
     statement = select(Order, Consumer, Provider, Task, Supply).join(
         Consumer, Order.consumer_id == Consumer.id
     ).join(
@@ -954,6 +974,7 @@ async def get_order_detail(
     Consumer = aliased(User)
     Provider = aliased(User)
 
+    # pyrefly: ignore [no-matching-overload]
     statement = select(Order, Consumer, Provider, Task, Supply).join(
         Consumer, Order.consumer_id == Consumer.id
     ).join(
@@ -1105,8 +1126,10 @@ async def join_live_call(
         .where(
             OrderLog.order_id == order.id,
             OrderLog.operator_id == other_user_id,
+            # pyrefly: ignore [missing-attribute]
             OrderLog.action.in_(["join_call", "leave_call"])
         )
+        # pyrefly: ignore [missing-attribute]
         .order_by(OrderLog.id.desc())
     ).first()
 
@@ -1230,9 +1253,11 @@ async def get_chat_history(
         statement = statement.where(ChatMessage.order_id == order_id)
     
     if since_id:
+        # pyrefly: ignore [unsupported-operation]
         statement = statement.where(ChatMessage.id > since_id)
         
     # 按 ID 升序排列 (旧 -> 新)，方便客户端追加到 UI 底部
+    # pyrefly: ignore [missing-attribute]
     statement = statement.order_by(ChatMessage.id.asc())
     
     return session.exec(statement).all()
@@ -1249,14 +1274,17 @@ async def get_unread_counts(
     # 使用聚合查询一次性计算所有订单的未读数，避免 N+1 查询
     # 逻辑: 统计 receiver_id 是我，且 消息ID > 我的 last_read_msg_id 的消息数量
     statement = (
+        # pyrefly: ignore [bad-argument-type]
         select(ChatMessage.order_id, func.count(ChatMessage.id))
         .outerjoin(
             OrderReadStatus, 
+            # pyrefly: ignore [bad-argument-type]
             (OrderReadStatus.order_id == ChatMessage.order_id) & 
             (OrderReadStatus.user_id == current_user.id)
         )
         .where(ChatMessage.receiver_id == current_user.id)
         .where(ChatMessage.id > func.coalesce(OrderReadStatus.last_read_msg_id, 0))
+        # pyrefly: ignore [bad-argument-type]
         .group_by(ChatMessage.order_id)
     )
     
